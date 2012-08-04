@@ -9,6 +9,7 @@ from greenlet import greenlet
 
 from diesel.hub import EventHub
 from diesel import log, Connection, UDPSocket, Loop
+from diesel.core import UDPConnection
 from diesel.security import ssl_async_handshake
 from diesel import runtime
 from diesel.events import WaitPool
@@ -120,7 +121,7 @@ class Application(object):
         pass
 
 class Service(object):
-    '''A TCP service listening on a certain port, with a protocol 
+    '''A TCP service listening on a certain port, with a protocol
     implemented by a passed connection handler.
     '''
     LQUEUE_SIZ = 500
@@ -138,7 +139,7 @@ class Service(object):
         self.ssl_ctx = ssl_ctx
 
     def handle_cannot_bind(self, reason):
-        log.critical("service at {0}:{1} cannot bind: {2}", 
+        log.critical("service at {0}:{1} cannot bind: {2}",
             self.iface or '*', self.port, reason)
         raise
 
@@ -222,8 +223,36 @@ class UDPService(Service):
         runtime.current_app.add_loop(l)
 
     def register(self, app):
-        pass
+       pass
 
+class UDPConnectionService(Service):
+    '''A UDP service listening on a certain port, with a protocol
+    implemented by a passed connection handler.
+    '''
+    def __init__(self, connection_handler, port, iface=''):
+        super(UDPConnectionService, self).__init__(connection_handler, port, iface)
+        self.udp_connection = None
+
+    def bind_and_listen(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # unsure if the following two lines are necessary for UDP
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setblocking(0)
+
+        try:
+            print "binding to port %s" % str(self.port)
+            sock.bind((self.iface, self.port))
+        except socket.error, e:
+            self.handle_cannot_bind(str(e))
+
+        self.sock = sock
+        self.udp_connection = UDPConnection(self, sock, None, None, self.connection_handler)
+        #l = Loop(self.datagram_loop)
+        #l.connection_stack.append(self.udp_connection)
+        #runtime.current_app.add_loop(l)
+
+    def register(self, app):
+        pass
 
 def quickstart(*args, **kw):
     if '__app' in kw:

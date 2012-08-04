@@ -1,6 +1,7 @@
 # vim:ts=4:sw=4:expandtab
 import socket
 import errno
+import ipdb
 
 class Client(object):
     '''An agent that connects to an external host and provides an API to
@@ -76,3 +77,22 @@ class UDPClient(Client):
         def __set__(self, inst, value):
             inst.addr, inst.port = value
     remote_addr = remote_addr()
+
+class UDPConnectionClient(UDPClient):
+    def __init__(self, addr, port, connection_handler):
+        self.connection_handler = connection_handler
+        super(UDPConnectionClient, self).__init__(addr, port)
+
+    def _setup_socket(self, ip, timeout):
+        from core import UDPConnection
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setblocking(0)
+        self.conn = UDPConnection(self, sock, ip, self.port, self.connection_handler)
+        # testing
+        #l = Loop(self.conn.datagram_loop)
+        #l.connection_stack.append(c)
+        #runtime.current_app.add_loop(l)
+
+        self.connected = True
+
+

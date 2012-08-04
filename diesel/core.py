@@ -481,6 +481,35 @@ class Loop(object):
         conn.queue_outgoing(o, priority)
         conn.set_writable(True)
 
+class ConnectedLoop(Loop):
+    def __init__(self, loop_connection, loop_callable, *args, **kw):
+        super(ConnectedLoop, self).__init__(loop_callable, *args, **kw)
+        self.loop_connection = loop_connection
+
+    def check_connection(self):
+        print "check_connection from connected loop"
+        #TODO: need somethign like this ?
+        # if self.loop_connection.closed:
+        #    raise ConnectionClosed("Cannot complete TCP socket operation: associated connection is closed")
+        return self.loop_connection
+
+    def fork(self, make_child, f, *args, **kw):
+        def wrap():
+            return f(*args, **kw)
+        l = ConnectedLoop(self.loop_connection, wrap)
+        if make_child:
+            self.children.add(l)
+            l.parent = self
+            #if self.connection_stack:
+            #    print "adding connection to child loop %s" % str(self.connection_stack[-1])
+            #    #l.connection_stack.append( self.connection_stack[-1] )
+            #    #l.connection_stack = self.connection_stack
+            #    #l.remote_addr = self.remote_addr
+            #TODO: think we only need to inherit if it's a fork_child
+            l.loop_connection = self.loop_connection
+        self.app.add_loop(l)
+        return l
+
 class Connection(object):
     def __init__(self, sock, addr):
         self.hub = runtime.current_app.hub
@@ -627,7 +656,10 @@ class UDPSocket(Connection):
         self.incoming = deque([])
 
     def queue_outgoing(self, msg, priority=5):
-        dgram = Datagram(msg, self.parent.remote_addr)
+        if isinstance(msg, Datagram):
+            dgram = msg
+        else:
+            dgram = Datagram(msg, self.parent.remote_addr)
         self.outgoing.append(dgram)
 
     def check_incoming(self, condition, callback):
@@ -719,3 +751,133 @@ class UDPSocket(Connection):
             self.waiting_callback(
                 ConnectionClosed('Connection closed by remote host')
             )
+
+class UDPConnection(UDPSocket):
+    def __init__(self, parent, sock, ip=None, port=None, f_connection_loop = None, *args, **kw ):
+        super(UDPConnection, self).__init__(parent, sock, ip, port)
+        self.incoming = deque([])
+        self.udp_connections = dict()
+        self.connection_loop = f_connection_loop
+        #fork(self.datagram_loop)
+        #TODO: shut down loop during cleanup
+        l = Loop(self.datagram_loop)
+        runtime.current_app.add_loop(l)
+
+    def datagram_loop(self):
+        while True:
+            current_loop.connection_stack.append(self)
+            dgram = receive(datagram)
+            current_loop.connection_stack.pop()
+            remote_addr = dgram.addr
+            conn_key = str(remote_addr)
+            if not conn_key in self.udp_connections:
+                if True: # self.owner.should_start_new_connection(remote_addr, datagram):
+                    client_connection = UDPClientConnection(self, self.sock, remote_addr)
+                    self.udp_connections[conn_key] = client_connection
+                    udp_loop = ConnectedLoop(client_connection, self.connection_loop, client_connection.incoming)
+                    #udp_loop.connection_stack.append(self)
+                    runtime.current_app.add_loop(udp_loop)
+                    #diesel.fork_child(udp_loop)
+            client_conn = self.udp_connections[conn_key]
+            #current_loop.connection_stack.append(self)
+            client_conn.incoming.put(dgram)
+            #current_loop.connection_stack.pop()
+
+    def handle_read(self):
+        '''The low-level handler called by the event hub
+        when the socket is ready for reading.
+        '''
+        if self.closed:
+            return
+        try:
+            data, addr = self.sock.recvfrom(BUFSIZ)
+            dgram = Datagram(data, addr)
+        except socket.error, e:
+            code, s = e
+            if code in (errno.EAGAIN, errno.EINTR):
+                return
+            dgram = Datagram('', (None, None))
+        except (SSL.WantReadError, SSL.WantWriteError, SSL.WantX509LookupError):
+            return
+        except SSL.ZeroReturnError:
+            dgram = Datagram('', (None, None))
+        except SSL.SysCallError:
+            dgram = Datagram('', (None, None))
+        except:
+            sys.stderr.write("Unknown Error on recv():\n%s"
+            % traceback.format_exc())
+            dgram = Datagram('', (None, None))
+
+        if not dgram:
+            self.shutdown(True)
+        elif self.waiting_callback:
+            self.waiting_callback(dgram)
+        else:
+            self.incoming.append(dgram)
+
+    def cleanup(self):
+        print "udp_connection_cleanup"
+        super(UDPConnection, self).cleanup()
+
+    def shutdown(self, remote_closed=False):
+        print "udp_connection shutdown"
+        super(UDPConnection, self).shutdown(remote_closed)
+
+from diesel.util.queue import Queue
+
+class UDPClientConnection(object): #UDPSocket):
+    def __init__(self, parent, sock, remote_addr):
+        self.port = remote_addr[1]
+        self.parent = parent
+
+        self.addr = remote_addr[0]
+        #super(UDPClientConnection, self).__init__(self, None, remote_addr[0])
+        self.incoming = Queue()
+
+    def queue_outgoing(self, msg, priority=5):
+        if isinstance(msg, Datagram):
+            dgram = msg
+        else:
+            dgram = Datagram(msg, (self.addr, self.port))
+        self.parent.queue_outgoing(dgram, priority)
+
+    def check_incoming(self, condition, callback):
+        assert condition is datagram, "UDP supports datagram sentinels only"
+        if self.incoming:
+            value = self.incoming.popleft()
+            #TODO: do we need this still? prob do to keep diesel happy
+            self.parent.parent.remote_addr = value.addr
+            return value
+        def _wrap(value=ContinueNothing):
+            if isinstance(value, Datagram):
+                self.parent.parent.remote_addr = value.addr
+            return callback(value)
+        return _wrap
+
+    def handle_write(self):
+        self.parent.handle_write()
+        self.set_writable(False)
+
+    def cleanup(self):
+        self.waiting_callback = None
+
+    def close(self):
+        self.set_writable(True)
+
+    def shutdown(self, remote_closed=False):
+        '''Clean up after the connection_handler ends.'''
+        self.hub.unregister(self.sock)
+        self.closed = True
+        #self.sock.close()
+
+        if remote_closed and self.waiting_callback:
+            self.waiting_callback(
+                ConnectionClosed('Connection closed by remote host')
+            )
+
+    def closed(self):
+        return self.closed
+
+    def set_writable(self, val):
+        self.parent.set_writable(val)
+

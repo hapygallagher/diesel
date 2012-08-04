@@ -3,7 +3,7 @@ import random
 from collections import deque
 from contextlib import contextmanager
 
-from diesel import fire, sleep, first
+from diesel.core import fire, sleep, first
 from diesel.events import Waiter, StopWaitDispatch
 
 class QueueEmpty(Exception): pass
