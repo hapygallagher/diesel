@@ -10,7 +10,7 @@ import itertools
 from collections import deque
 from OpenSSL import SSL
 from greenlet import greenlet
-
+import ipdb
 from diesel import pipeline
 from diesel import buffer
 from diesel.security import ssl_async_handshake
@@ -486,6 +486,13 @@ class ConnectedLoop(Loop):
         super(ConnectedLoop, self).__init__(loop_callable, *args, **kw)
         self.loop_connection = loop_connection
 
+    def run(self):
+        try:
+            super(ConnectedLoop, self).run()
+        finally:
+            if self.parent is None:                     # don't shutdown the connection unless we are the parent loop
+                self.loop_connection.shutdown(False)
+
     def check_connection(self):
         print "check_connection from connected loop"
         #TODO: need somethign like this ?
@@ -763,6 +770,14 @@ class UDPConnection(UDPSocket):
         l = Loop(self.datagram_loop)
         runtime.current_app.add_loop(l)
 
+    def unregister_client_connection(self, connection):
+        conn_key = connection.connection_key
+        print "removed connection %s" % conn_key
+        if conn_key in self.udp_connections:
+            del self.udp_connections[conn_key]
+        else:
+            print "warning! attempting to unregister a child UDPClientConnection, but was not found!"
+
     def datagram_loop(self):
         while True:
             current_loop.connection_stack.append(self)
@@ -829,10 +844,22 @@ class UDPClientConnection(object): #UDPSocket):
     def __init__(self, parent, sock, remote_addr):
         self.port = remote_addr[1]
         self.parent = parent
+        self.closed = False
 
         self.addr = remote_addr[0]
         #super(UDPClientConnection, self).__init__(self, None, remote_addr[0])
         self.incoming = Queue()
+
+        #TODO: not sure if we need this, other connections have this but maybe we don't actually wait on this connection in the same way
+        self.waiting_callback = None
+
+    @staticmethod
+    def generate_connection_key(remote_addr):
+        return str(remote_addr)
+
+    @property
+    def connection_key(self):
+        return UDPClientConnection.generate_connection_key( (self.addr, self.port) )
 
     def queue_outgoing(self, msg, priority=5):
         if isinstance(msg, Datagram):
@@ -866,14 +893,15 @@ class UDPClientConnection(object): #UDPSocket):
 
     def shutdown(self, remote_closed=False):
         '''Clean up after the connection_handler ends.'''
-        self.hub.unregister(self.sock)
-        self.closed = True
-        #self.sock.close()
-
-        if remote_closed and self.waiting_callback:
-            self.waiting_callback(
-                ConnectionClosed('Connection closed by remote host')
-            )
+        if not self.closed:
+            self.closed = True
+            #we have no real socket, so can't close, but we do need to unregister ourselves with the parent connection
+            #self.sock.close
+            self.parent.unregister_client_connection(self)
+            if remote_closed and self.waiting_callback:
+                self.waiting_callback(
+                    ConnectionClosed('Connection closed by remote host')
+                )
 
     def closed(self):
         return self.closed
