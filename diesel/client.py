@@ -83,16 +83,14 @@ class UDPConnectionClient(UDPClient):
         self.connection_handler = connection_handler
         super(UDPConnectionClient, self).__init__(addr, port)
 
-    def _setup_socket(self, ip, timeout):
+    def _create_new_connection(self, parent, sock, ip, port, f_connection_loop, *args, **kw):
         from core import UDPConnection
+        return UDPConnection(parent, sock, ip, port, f_connection_loop, *args, **kw)
+
+    def _setup_socket(self, ip, timeout):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setblocking(0)
-        self.conn = UDPConnection(self, sock, ip, self.port, self.connection_handler)
-        # testing
-        #l = Loop(self.conn.datagram_loop)
-        #l.connection_stack.append(c)
-        #runtime.current_app.add_loop(l)
-
+        self.conn = self._create_new_connection(self, sock, ip, self.port, self.connection_handler)
         self.connected = True
 
 

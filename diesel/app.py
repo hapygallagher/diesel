@@ -246,10 +246,11 @@ class UDPConnectionService(Service):
             self.handle_cannot_bind(str(e))
 
         self.sock = sock
-        self.udp_connection = UDPConnection(self, sock, None, None, self.connection_handler)
-        #l = Loop(self.datagram_loop)
-        #l.connection_stack.append(self.udp_connection)
-        #runtime.current_app.add_loop(l)
+        #self.udp_connection = UDPConnection(self, sock, None, None, self.connection_handler)
+        self.udp_connection = self._create_new_connection(self, sock, None, None, self.connection_handler)
+
+    def _create_new_connection(self, parent, sock, ip, port, f_connection_loop, *args, **kw):
+        return UDPConnection(parent, sock, ip, port, f_connection_loop, *args, **kw)
 
     def register(self, app):
         pass
