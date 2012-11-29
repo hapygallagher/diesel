@@ -14,6 +14,8 @@ class Client(object):
         self.addr = addr
         self.port = port
 
+        print("UDPCLIENT SETUPSOCKET %s %s" % (self.addr, str(self.port)) )
+
         ip = self._resolve(self.addr)
         self._setup_socket(ip, timeout)
 
@@ -22,6 +24,7 @@ class Client(object):
         return resolve_dns_name(addr)
 
     def _setup_socket(self, ip, timeout):
+        print("UDPCLIENT SETUPSOCKET %s %s" % (ip, str(self.port)) )
         from core import _private_connect
         remote_addr = (ip, self.port)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -59,9 +62,11 @@ class Client(object):
 class UDPClient(Client):
     def __init__(self, addr, port):
         super(UDPClient, self).__init__(addr, port)
+        print("UDPCLIENT SETUP %s %s" % (addr, str(port)) )
 
     def _setup_socket(self, ip, timeout):
         from core import UDPSocket
+        print("UDPCLIENT SETUPSOCKET %s %s" % (ip, str(self.port)) )
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setblocking(0)
         self.conn = UDPSocket(self, sock, ip, self.port)
@@ -83,11 +88,13 @@ class UDPConnectionClient(UDPClient):
         self.connection_handler = connection_handler
         super(UDPConnectionClient, self).__init__(addr, port)
 
-    def _create_new_connection(self, parent, sock, ip, port, f_connection_loop, *args, **kw):
-        from core import UDPConnection
-        return UDPConnection(parent, sock, ip, port, f_connection_loop, *args, **kw)
+#    def _create_new_connection(self, parent, sock, ip, port, f_connection_loop, *args, **kw):
+#        ipdb.set_trace()
+#        from core import UDPConnection
+#        return UDPConnection(parent, sock, ip, port, f_connection_loop, *args, **kw)
 
     def _setup_socket(self, ip, timeout):
+        print("UDPCLIENT SETUPSOCKET %s %s" % (ip, str(self.port)) )
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setblocking(0)
         self.conn = self._create_new_connection(self, sock, ip, self.port, self.connection_handler)

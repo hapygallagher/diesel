@@ -133,16 +133,20 @@ class ReliableUDPClientConnection(UDPClientConnection):
             self.remote_seq = remote_msg_seq
 
         if (msg_len > ReliableHeader.max_usr_len or msg_len < 0):
+            print("processing as multipacket")
             processed_msg = False
             for pending in self.pending_multipackets:
                 if pending.needs_msg(remote_msg_seq, msg_len, dgram):
                     processed_msg = True
+                    print ("adding to pending multipackets")
                     if pending.is_complete():
+                        #ipdb.set_trace()
                         complete_msg = pending.get_msg()
                         super(ReliableUDPClientConnection, self).process_datagram(complete_msg)
                         self.pending_multipackets.remove(pending)
                         break
             if not processed_msg:
+                print ("new pending multipackets")
                 pending_multipacket = PendingMultiPacketMsg(remote_msg_seq, msg_len, dgram)
                 self.pending_multipackets.append(pending_multipacket)
         else:
@@ -182,6 +186,7 @@ class ReliableUDPClientConnection(UDPClientConnection):
             self.local_seq = seq_add(self.local_seq, 1) #self.local_seq + 1
             assert(len(header_bytes + msg_bytes) <= ReliableHeader.max_msg_len)
             outgoing_dgram = Datagram(header_bytes + msg_bytes, dgram.addr)
+            print("dgram: %s", outgoing_dgram)
             super(ReliableUDPClientConnection, self).queue_outgoing(outgoing_dgram, priority)
 
             curr_start_idx = curr_end_idx
@@ -189,14 +194,17 @@ class ReliableUDPClientConnection(UDPClientConnection):
 
 class ReliableUDPConnection(UDPConnection):
     def _create_new_connection(self, sock, remote_addr):
+        print("RELIABLEUDPCONNECION: create_new_conenection")
         return ReliableUDPClientConnection(self, sock, remote_addr)
 
 class ReliableUDPConnectionService(UDPConnectionService):
     def _create_new_connection(self, parent, sock, ip, port, f_connection_loop, *args, **kw):
+        print("RELIABLEUDPCONNECION SERVICE: create_new_conenection")
         return ReliableUDPConnection(parent, sock, ip, port, f_connection_loop, *args, **kw)
 
 class ReliableUDPConnectionClient(UDPConnectionClient):
     def _create_new_connection(self, parent, sock, ip, port, f_connection_loop, *args, **kw):
+        print("RELIABLEUDP CLIENT CONNECION: create_new_conenection")
         return ReliableUDPConnection(parent, sock, ip, port, f_connection_loop, *args, **kw)
 
 

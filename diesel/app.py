@@ -13,6 +13,7 @@ from diesel.core import UDPConnection
 from diesel.security import ssl_async_handshake
 from diesel import runtime
 from diesel.events import WaitPool
+import ipdb
 
 class ApplicationEnd(Exception): pass
 
@@ -62,6 +63,8 @@ class Application(object):
                     break
                 except KeyboardInterrupt:
                     log.warning("-- KeyboardInterrupt raised.. exiting main loop --")
+                    if __debug__:
+                        raise
                     break
                 except ApplicationEnd:
                     log.warning("-- ApplicationEnd raised.. exiting main loop --")
