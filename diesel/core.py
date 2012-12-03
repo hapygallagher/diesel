@@ -235,9 +235,12 @@ class Loop(object):
         return self.dispatch()
 
     def fork(self, make_child, f, *args, **kw):
-        def wrap():
-            return f(*args, **kw)
-        l = Loop(wrap)
+        if callable(f):
+            def wrap():
+                return f(*args, **kw)
+            l = Loop(wrap)
+        else:
+            l = f
         if make_child:
             self.children.add(l)
             l.parent = self
@@ -497,7 +500,8 @@ class ConnectedLoop(Loop):
         try:
             super(ConnectedLoop, self).run()
         finally:
-            if self.parent is None and self.owns_connection:                     # don't shutdown the connection unless we are the parent loop
+            if self.owns_connection:
+                print "connected loop shutting down connection"
                 self.loop_connection.shutdown(False)
 
     def check_connection(self):
@@ -508,13 +512,17 @@ class ConnectedLoop(Loop):
         return self.loop_connection
 
     def fork(self, make_child, f, *args, **kw):
-        def wrap():
-            return f(*args, **kw)
-        l = ConnectedLoop(self.loop_connection, wrap)
+        if callable(f):
+            def wrap():
+                return f(*args, **kw)
+            l = ConnectedLoop(self.loop_connection, wrap)
+        else:
+            l = f
         if make_child:
             self.children.add(l)
             l.parent = self
             l.loop_connection = self.loop_connection
+            l.owns_connection = False
         self.app.add_loop(l)
         return l
 
