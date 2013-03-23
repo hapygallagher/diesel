@@ -17,6 +17,10 @@ class Queue(Waiter):
         self.inp.append(i)
         fire(self)
 
+    def putleft(self, i=None):
+        self.inp.appendleft(i)
+        fire(self)
+
     def get(self, waiting=True, timeout=None):
         if self.inp:
             val = self.inp.popleft()

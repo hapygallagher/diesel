@@ -243,7 +243,7 @@ class UDPConnectionService(Service):
         sock.setblocking(0)
 
         try:
-            print "binding to port %s" % str(self.port)
+            log.info("binding to port %s" % str(self.port))
             sock.bind((self.iface, self.port))
         except socket.error, e:
             self.handle_cannot_bind(str(e))

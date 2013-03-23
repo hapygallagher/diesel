@@ -140,7 +140,10 @@ class call(object):
             try:
                 r = self.f(self.client, *args, **kw)
             finally:
-                current_loop.connection_stack.pop()
+                try:
+                    current_loop.connection_stack.pop()
+                except:
+                    ipdb.set_trace()
         except ConnectionClosed, e:
             raise ClientConnectionClosed(str(e), addr=self.client.addr, port=self.client.port)
         return r
@@ -501,11 +504,11 @@ class ConnectedLoop(Loop):
             super(ConnectedLoop, self).run()
         finally:
             if self.owns_connection:
-                print "connected loop shutting down connection"
+                log.debug("connected loop shutting down connection")
                 self.loop_connection.shutdown(False)
 
     def check_connection(self):
-        print "check_connection from connected loop"
+        log.debug("check_connection from connected loop")
         #TODO: need something like this ?
         # if self.loop_connection.closed:
         #    raise ConnectionClosed("Cannot complete TCP socket operation: associated connection is closed")
@@ -679,10 +682,10 @@ class UDPSocket(Connection):
         self.outgoing.append(dgram)
 
     def check_incoming(self, condition, callback):
-        print "UDPSocket check_incoming"
+        log.debug("UDPSocket check_incoming")
         assert condition is datagram, "UDP supports datagram sentinels only"
         if self.incoming:
-            print "incoming found"
+            log.debug("incoming found")
             value = self.incoming.popleft()
             self.parent.remote_addr = value.addr
             return value
@@ -700,7 +703,7 @@ class UDPSocket(Connection):
             dgram = self.outgoing.popleft()
             try:
                 bsent = self.sock.sendto(dgram, dgram.addr)
-                print("(((((UDP SOCKET actually sent msg to %s : %s" % (dgram.addr))
+                log.debug("(((((UDP SOCKET actually sent msg to %s", dgram.addr)
             except socket.error, e:
                 code, s = e
                 if code in (errno.EAGAIN, errno.EINTR):
@@ -720,9 +723,9 @@ class UDPSocket(Connection):
                 self.shutdown(True)
             else:
                 assert bsent == len(dgram), "complete datagram not sent!"
-        print("writeable")
+        log.debug("writeable")
         self.set_writable(False)
-        print("writeable false done")
+        log.debug("writeable false done")
 
     def handle_read(self):
         '''The low-level handler called by the event hub
@@ -733,7 +736,7 @@ class UDPSocket(Connection):
         try:
             data, addr = self.sock.recvfrom(BUFSIZ)
             dgram = Datagram(data, addr)
-            print("(((((UDPSocket received datagram %s" % (addr))
+            log.debug("(((((UDPSocket received datagram %s" % (addr))
         except socket.error, e:
             code, s = e
             if code in (errno.EAGAIN, errno.EINTR):
@@ -777,6 +780,8 @@ class UDPSocket(Connection):
 
 class UDPConnection(UDPSocket):
     def __init__(self, parent, sock, ip=None, port=None, f_connection_loop = None, *args, **kw ):
+        if ip:
+            ip = socket.gethostbyname(ip)
         super(UDPConnection, self).__init__(parent, sock, ip, port)
         #self.incoming = deque([])
         self.udp_connections = dict()
@@ -791,21 +796,21 @@ class UDPConnection(UDPSocket):
 
     def unregister_client_connection(self, connection):
         conn_key = connection.connection_key
-        print "removed connection %s" % conn_key
+        log.debug("removed connection %s" % conn_key)
         if conn_key in self.udp_connections:
             del self.udp_connections[conn_key]
         else:
-            print "warning! attempting to unregister a child UDPClientConnection, but was not found!"
+            log.warning("warning! attempting to unregister a child UDPClientConnection, but was not found!")
 
     def _create_new_connection(self, sock, remote_addr):
         return UDPClientConnection(self, sock, remote_addr)
 
     def check_child_connection(self, remote_addr):
         conn_key = UDPClientConnection.generate_connection_key(remote_addr)
-        print("+++++++ check connection for %s : connkey %s" % (remote_addr, conn_key))
+        log.debug("+++++++ check connection for %s : connkey %s" % (remote_addr, conn_key))
         if not conn_key in self.udp_connections:
             if True: # self.owner.should_start_new_connection(remote_addr, datagram):
-                print("+++++++CREATED NEW CONNECTION check connection for %s : connkey %s" % (remote_addr, conn_key))
+                log.debug("+++++++CREATED NEW CONNECTION check connection for %s : connkey %s" % (remote_addr, conn_key))
                 client_connection = self._create_new_connection(self.sock, remote_addr)  #ReliableUDPClientConnection(self, self.sock, remote_addr)
                 self.udp_connections[conn_key] = client_connection
                 udp_loop = ConnectedLoop(client_connection, self.connection_loop, client_connection.incoming)
@@ -831,7 +836,7 @@ class UDPConnection(UDPSocket):
             current_loop.connection_stack.pop()
             remote_addr = dgram.addr
             client_conn = self.check_child_connection(remote_addr)
-            print("processing datagram in UDPConnection dgram: %s" % dgram)
+            log.debug("processing datagram in UDPConnection dgram: %s", dgram)
             client_conn.process_datagram(dgram)
 
     def handle_read(self):
@@ -843,7 +848,7 @@ class UDPConnection(UDPSocket):
         try:
             data, addr = self.sock.recvfrom(BUFSIZ)
             dgram = Datagram(data, addr)
-            print("(((((UDP CONNECTION received datagram %s" % (str(addr)))
+            log.debug("(((((UDP CONNECTION received datagram %s" % (str(addr)))
         except socket.error, e:
             code, s = e
             if code in (errno.EAGAIN, errno.EINTR):
@@ -868,11 +873,11 @@ class UDPConnection(UDPSocket):
             self.incoming.append(dgram)
 
     def cleanup(self):
-        print "udp_connection_cleanup"
+        log.debug("udp_connection_cleanup")
         super(UDPConnection, self).cleanup()
 
     def shutdown(self, remote_closed=False):
-        print "udp_connection shutdown"
+        log.debug("udp_connection shutdown")
         super(UDPConnection, self).shutdown(remote_closed)
 
 
@@ -899,7 +904,7 @@ class UDPClientConnection(object): #UDPSocket):
         return UDPClientConnection.generate_connection_key( (self.addr, self.port) )
 
     def process_datagram(self, dgram):
-        print("UDP CLIENT CONNECTION process datagram dgram: %s : incoming %s" % (dgram, self.incoming))
+        log.debug("UDP CLIENT CONNECTION process datagram dgram: %s : incoming %s", (dgram, self.incoming))
         self.incoming.put(dgram)
 
     def queue_outgoing(self, msg, priority=5):
@@ -910,10 +915,10 @@ class UDPClientConnection(object): #UDPSocket):
         self.parent.outgoing.append(dgram)
 
     def check_incoming(self, condition, callback):
-        print "UDPCLientconnection check_incoming"
+        log.debug("UDPCLientconnection check_incoming")
         assert condition is datagram, "UDP supports datagram sentinels only"
         if self.incoming:
-            print "incoming found"
+            log.debug("incoming found")
             value = self.incoming.popleft()
             #TODO: do we need this still? prob do to keep diesel happy
             self.parent.parent.remote_addr = value.addr
@@ -925,11 +930,11 @@ class UDPClientConnection(object): #UDPSocket):
         return _wrap
 
     def handle_write(self):
-        print("handle write")
+        log.debug("handle write")
         self.parent.handle_write()
-        print("handle set writable false")
+        log.debug("handle set writable false")
         self.set_writable(False)
-        print("handle set false")
+        log.debug("handle set false")
 
     def cleanup(self):
         self.waiting_callback = None

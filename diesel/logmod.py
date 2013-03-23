@@ -13,6 +13,7 @@ diesel_format.conversion = formats.ConversionTable()
 diesel_format.conversion.add("time", partial(time.strftime, "%Y/%m/%d %H:%M:%S"), "[{1}]".format)
 diesel_format.conversion.add("name", str, "{{{1}}}".format)
 diesel_format.conversion.add("level", str, "{1}".format)
+diesel_format.conversion.add("conn", str, "{1}".format)
 diesel_format.conversion.aggregate = " ".join
 diesel_format.conversion.genericValue = str
 diesel_format.conversion.genericItem = lambda _1, _2: ""
