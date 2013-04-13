@@ -490,7 +490,9 @@ class Loop(object):
     def send(self, o, priority=5):
         conn = self.check_connection()
         conn.queue_outgoing(o, priority)
+        print "loop set writable TRUE"
         conn.set_writable(True)
+        print "loop set writable TRUE DONE"
 
 class ConnectedLoop(Loop):
 
@@ -699,23 +701,29 @@ class UDPSocket(Connection):
         '''The low-level handler called by the event hub
         when the socket is ready for writing.
         '''
+        log.info("UDPsocket handle_write, ready for write")
         while self.outgoing:
+            log.info("UDPsocket self.outgoing.popleft() attempt")
             dgram = self.outgoing.popleft()
             try:
                 bsent = self.sock.sendto(dgram, dgram.addr)
-                log.debug("(((((UDP SOCKET actually sent msg to %s", dgram.addr)
+                log.debug("(((((UDP SOCKET actually sent msg to %s" % str(dgram.addr))
             except socket.error, e:
+                print "socket error"
                 code, s = e
                 if code in (errno.EAGAIN, errno.EINTR):
                     self.outgoing.appendleft(dgram)
                     return
                 self.shutdown(True)
             except (SSL.WantReadError, SSL.WantWriteError, SSL.WantX509LookupError):
+                print "ssl error"
                 self.outgoing.appendleft(dgram)
                 return
             except SSL.ZeroReturnError:
+                print "ssl shutdown error"
                 self.shutdown(True)
             except SSL.SysCallError:
+                print "ssl sys call error"
                 self.shutdown(True)
             except:
                 sys.stderr.write("Unknown Error on send():\n%s"
@@ -734,6 +742,7 @@ class UDPSocket(Connection):
         if self.closed:
             return
         try:
+            log.debug("(((((UDPSocket waiting to receive datagram %s")
             data, addr = self.sock.recvfrom(BUFSIZ)
             dgram = Datagram(data, addr)
             log.debug("(((((UDPSocket received datagram %s" % (addr))
@@ -788,8 +797,8 @@ class UDPConnection(UDPSocket):
         self.connection_loop = f_connection_loop
         #fork(self.datagram_loop)
         #TODO: shut down loop during cleanup
-        l = Loop(self.datagram_loop)
-        runtime.current_app.add_loop(l)
+        self.diesel_datagram_loop = Loop(self.datagram_loop)
+        runtime.current_app.add_loop(self.diesel_datagram_loop)
         if ip is not None and port is not None:
             remote_addr = (ip, port)
             self.check_child_connection(remote_addr)
@@ -826,8 +835,11 @@ class UDPConnection(UDPSocket):
         else:
             dgram = Datagram(msg, (self.addr, self.port))
 
+        log.info("UDPConnection check connection")
         child_conn = self.check_child_connection(dgram.addr)
+        log.info("UDPConnection check connection child : %s" % child_conn.addr)
         child_conn.queue_outgoing(msg, priority)
+        log.info("UDPConnection queued outgoing DONE")
 
     def datagram_loop(self):
         while True:
@@ -836,7 +848,7 @@ class UDPConnection(UDPSocket):
             current_loop.connection_stack.pop()
             remote_addr = dgram.addr
             client_conn = self.check_child_connection(remote_addr)
-            log.debug("processing datagram in UDPConnection dgram: %s", dgram)
+            log.debug("processing datagram in UDPConnection dgram: addr %s" % client_conn.addr)
             client_conn.process_datagram(dgram)
 
     def handle_read(self):
@@ -912,7 +924,10 @@ class UDPClientConnection(object): #UDPSocket):
             dgram = msg
         else:
             dgram = Datagram(msg, (self.addr, self.port))
+        log.debug("UDPClientConnection queue outgoing")
         self.parent.outgoing.append(dgram)
+        #self.parent.queue_outgoing(dgram)
+        log.debug("UDPClientConnection queue outgoing DONE")
 
     def check_incoming(self, condition, callback):
         log.debug("UDPCLientconnection check_incoming")
@@ -921,6 +936,7 @@ class UDPClientConnection(object): #UDPSocket):
             log.debug("incoming found")
             value = self.incoming.popleft()
             #TODO: do we need this still? prob do to keep diesel happy
+            ipdb.set_trace()
             self.parent.parent.remote_addr = value.addr
             return value
         def _wrap(value=ContinueNothing):

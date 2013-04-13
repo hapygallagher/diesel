@@ -13,6 +13,7 @@ import diesel.runtime
 #import diesel
 import sys
 import ipdb
+import diesel
 
 class ReliableHeader(object):
     struct = Struct("I i I I")
@@ -133,10 +134,12 @@ class PendingMultiPacketMsg(object):
             log.info("NEW PendingMultipacket ID %d, num_packets %d, FIRST: %d, LAST: %d" % (multi_seq_id, self.num_packets, self.first_seq, self.last_seq))
 
     def _grow_num_packets(self, new_max):
-        curr_num_packets = len(self.packets)
-        if curr_num_packets < self.num_packets:
-            ipdb.set_trace()
-            self.packets.join( [None for i in range(self.num_packets - curr_num_packets)])
+        self.num_packets = new_max
+        if self.num_packets < new_max:
+            prev_num_packets = self.num_packets
+            self.num_packets = new_max
+            self.packets.join( [None for i in range(self.num_packets - prev_num_packets)])
+            assert(len(self.packets) == new_max)
 
     def needs_msg(self, multi_seq_id, msg_seq, msg_len, msg):
         if self.num_packets > 0:
@@ -151,20 +154,21 @@ class PendingMultiPacketMsg(object):
                     ipdb.set_trace()
                 return True
         else:
-            ipdb.set_trace()
-            if msg_seq >= 0: # this is the first message
-                self.packets[0] = msg
-                self.first_seq = msg_seq
-                self.num_packets = ReliableHeader.calc_num_packets(msg_len)
-                self.multi_seq_id = multi_seq_id
-                self._grow_num_packets(self.num_packets)
-                self.last_seq = seq_add(self.first_seq, self.num_packets) #self.first_seq + self.num_packets
-            else:
-                ipdb.set_trace()
-                assert(False) #
-                self._grow_num_packets(-msg_seq)
-                self.packets[-msg_seq]
-                self.multi_seq_id = multi_seq_id
+            if self.multi_seq_id == multi_seq_id:
+                log.info("adding to existing PendingMultipacket multi_seq_id %d, msg_len %d" % (multi_seq_id, msg_len))
+                if msg_len >= 0: # this is the first message
+                    self.packets[0] = msg
+                    self.first_seq = msg_seq
+                    self.num_packets = ReliableHeader.calc_num_packets(msg_len)
+                    self.multi_seq_id = multi_seq_id
+                    self._grow_num_packets(self.num_packets)
+                    self.last_seq = seq_add(self.first_seq, self.num_packets) #self.first_seq + self.num_packets
+                else:
+                    #NOTE: we've already received a packet, which also wasn't the first packet, and neither is this. add to our incomplete packets
+                    check_max = -msg_len + 1
+                    self._grow_num_packets(check_max)
+                    self.packets[-msg_len]
+                    self.multi_seq_id = multi_seq_id
         return False
 
     def is_complete(self):
@@ -477,10 +481,11 @@ class ReliableUDPClientConnection(UDPClientConnection):
     def __init__(self, parent, sock, remote_addr):
         super(ReliableUDPClientConnection, self).__init__(parent, sock, remote_addr)
         self.reliability = ReliableUDPClientConnection.ReliabilitySystem()
-        self.flow_control = ReliableUDPClientConnection.FlowControl()
+        self.flow_control = FlowControl()
         self.conn_info = "(%s:%s)" % (self.addr, self.port)
         self.reliability.conn_info = self.conn_info
         self.flow_control.conn_info = self.conn_info
+        self.unsent_queue = diesel.util.queue.Queue()
         #self.local_seq = 0
         #self.remote_seq = 0
         #self.sent_queue = list()
@@ -488,28 +493,104 @@ class ReliableUDPClientConnection(UDPClientConnection):
         #self.ack_queue = list()
         #self.pending_ack_queue = list()
         self.pending_multipackets = deque()
+        self.pending_resends = diesel.util.queue.Queue()
         self.multi_packet_seq = 0
+        #TODO: make child of connection so it shuts down
+        self.update_loop = diesel.core.ConnectedLoop(self, self.update)
+        runtime.current_app.add_loop(self.update_loop)
+
+    def _internal_queue_msg(self, outgoing_dgram, priority):
+        #TODO: re-order based on priority, but can't because seq # is set here already
+        self.unsent_queue.put(outgoing_dgram)
 
     def _internal_queue_outgoing(self, outgoing_dgram, priority):
         self.last_msg_dt = 0.0
+        lkajdsflkajsflkajsdfklajsdf
+#TODO: this is broken because it's not called after the local_seq is used, it's called later after it's been sitting in an outgoing queue for ages.
         self.reliability.packet_sent(self.reliability.local_seq, outgoing_dgram)
+        log.fields(conn=self.conn_info).info("_internal_queue_outgoing, presend count %d" % len(self.parent.outgoing))
+        #from net.settings import IS_CLIENT
+        #if not IS_CLIENT:
+        #    ipdb.set_trace()
+
+        # - calling parent queue outgoing
         super(ReliableUDPClientConnection, self).queue_outgoing(outgoing_dgram, priority)
 
+        self.set_writable(True)
+        log.fields(conn=self.conn_info).info("_internal_queue_outgoing, postsend count %d" % len(self.parent.outgoing))
 
-    def update(self, dt):
-        self.reliability.update(dt)
-        self.flow_control.update(dt, self.reliability.rtt * 1000.0)
-        missing_msgs = self.reliability.process_missing_msgs()
-        for msg in missing_msgs:
-            log.fields(conn=self.conn_info).info("resending unacked msg, seq: {0}", msg.seq)
-            #ipdb.set_trace()
-            data_dgram = Datagram(msg.data, self.addr)
-            header, msgdata = ReliableHeader.unpack(data_dgram)
-            header.seq = self.reliability.local_seq
-            dgram = header.to_data() + msgdata
-            self._internal_queue_outgoing(dgram, 1)
-        if self.reliability.last_msg_dt > ReliableUDPClientConnection.ReliabilitySystem.MAX_ACK_TIME:
-            self.queue_outgoing("")
+    def update(self):
+        import time
+        prev_time = time.clock()
+        send_delay = 0.0
+        send_accumulator = 0.0
+        send_rate = self.flow_control.send_rate()
+        while True:
+            #TODO: debug timing slower for now
+            curr_max_wait_time = ReliableUDPConnection.MAX_TIME_BETWEEN_ACKS
+            if send_delay > 0.0 and curr_max_wait_time > send_delay:
+                diesel.sleep(send_delay) # can't send until this delay is completed
+                curr_max_wait_time -= send_delay #NOTE: assuming send delay was approx what we said to sleep for.
+                if curr_max_wait_time < 0.0:
+                    curr_max_wait_time = 0.0
+                    #ipdb.set_trace()
+                send_delay = 0.0
+            #print curr_max_wait_time
+            evt, data = diesel.first(sleep=curr_max_wait_time, waits = [self.pending_resends, self.unsent_queue])
+
+            curr_time = time.clock()
+            dt = curr_time - prev_time
+            prev_time = curr_time
+
+            send_accumulator += dt
+
+            self.reliability.update(dt) #update latest acks etc.
+
+            next_msg = None
+            priority = None
+            if evt == self.pending_resends:
+                print "sending a resend, remaining: %d" % len(self.pending_resends.inp)
+                next_msg = data
+            elif evt == self.unsent_queue:
+                next_msg = data
+                print "sending unsent msg, remaining %d" % len(self.unsent_queue.inp)
+            else:
+                assert(evt == 'sleep')
+                #self.queue_outgoing("")
+                #TODO: maybe have some mechanism for skipping this msg if another is in the queue later
+                continue
+
+
+            missing_msgs = self.reliability.process_missing_msgs()
+            for msg in missing_msgs:
+                #ipdb.set_trace()
+                data_dgram = Datagram(msg.data, self.addr)
+                header, msgdata = ReliableHeader.unpack(data_dgram)
+                prev_seq = header.seq
+                next_seq = self.reliability.local_seq
+                header.seq = next_seq
+                self.reliability.local_seq = seq_add(next_seq, 1)
+                log.fields(conn=self.conn_info).info("resending unacked msg, prev seq: %d, new seq %d len %d", prev_seq, next_seq, header.msg_len)
+                dgram = header.to_data() + msgdata
+                #self._internal_queue_outgoing(dgram, 1)
+                #self._internal_queue_msg(dgram, 1)
+                self.pending_resends.put(dgram)
+
+            #NOTE: handled above
+            #if self.reliability.last_msg_dt > ReliableUDPClientConnection.ReliabilitySystem.MAX_ACK_TIME:
+            #    self.queue_outgoing("")
+
+            self._internal_queue_outgoing(next_msg, priority)
+
+            per_msg_rate = 1.0 / send_rate
+            send_accumulator -= per_msg_rate
+            send_rate = self.flow_control.send_rate()
+            send_delay = 0.0
+            if send_accumulator < per_msg_rate:
+                send_delay = -(send_accumulator - per_msg_rate)
+                #ipdb.set_trace()
+                assert(send_delay > 0.0)
+
 
     def process_datagram(self, dgram):
         #remote_msg_seq, msg_len, dgram = ReliableHeader.unpack(dgram)
@@ -526,7 +607,7 @@ class ReliableUDPClientConnection(UDPClientConnection):
         self.reliability.process_ack(header.ack, header.ack_bits)
 
         if (msg_len > ReliableHeader.max_usr_len or msg_len < 0):
-            log.fields(conn=self.conn_info).debug("processing as multipacket")
+            log.fields(conn=self.conn_info).debug("processing as multipacket multipacketid: %d", multi_seq_id)
             processed_msg = False
             for pending in self.pending_multipackets:
                 if pending.needs_msg(multi_seq_id, remote_msg_seq, msg_len, dgram):
@@ -597,11 +678,20 @@ class ReliableUDPClientConnection(UDPClientConnection):
             #self.reliability.packet_sent(curr_packet_seq, outgoing_dgram)
             #super(ReliableUDPClientConnection, self).queue_outgoing(outgoing_dgram, priority)
 
-            self._internal_queue_outgoing(outgoing_dgram, priority)
+            #self._internal_queue_outgoing(outgoing_dgram, priority)
+            print "1 queuing_msg. curr count : %d" % len(self.unsent_queue.inp)
+            #self._internal_queue_msg(outgoing_dgram, priority)
+            #self.unsent_queue.put(outgoing_dgram)
+            self.unsent_queue.inp.append(outgoing_dgram)
+            print "2 queuing_msg. curr count : %d" % len(self.unsent_queue.inp)
 
             #DO WHILE
             if curr_end_idx >= total_bytes:
+                print "done sending msg"
+                diesel.core.fire(self.unsent_queue)
                 break
+            #ipdb.set_trace()
+            print "not done, looping"
 
 
 
@@ -611,8 +701,8 @@ class ReliableUDPConnection(UDPConnection):
 
     def __init__(self, parent, sock, ip=None, port=None, f_connection_loop = None, *args, **kw ):
         super(ReliableUDPConnection, self).__init__(parent, sock, ip, port, f_connection_loop, *args, **kw)
-        l = Loop(self.update_client_connections)
-        runtime.current_app.add_loop(l)
+#        l = Loop(self.update_client_connections)
+#        runtime.current_app.add_loop(l)
         #diesel.fork_child(self.update_client_connections)
 
     def update_client_connections(self):
