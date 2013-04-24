@@ -9,7 +9,7 @@ if os.system("which palmc > /dev/null 2>&1") == 0:
 
 additional_requires = []
 
-VERSION = "3.0b1"
+VERSION = "3.0.18"
 
 setup(name="diesel",
     version=VERSION,
@@ -33,15 +33,22 @@ integration with the Flask web framework.
 
 Other bundled protocols include MongoDB, Riak, and Redis client libraries.
 ''',
-    url="http://dieselweb.org",
+    url="http://diesel.io",
     download_url="http://jamwt.com/diesel/diesel-%s.tar.gz" % VERSION,
-    packages=["diesel", "diesel.protocols", "diesel.util", "diesel.util.patches"],
+    packages=[
+        "diesel",
+        "diesel.protocols",
+        "diesel.util",
+        "diesel.util.patches",
+        "diesel.protocols.http",
+    ],
     scripts=["examples/dhttpd"],
     entry_points={
         'console_scripts': [
             'dpython = diesel.interactive:python',
             'idpython = diesel.interactive:ipython',
             'dnosetests = diesel.dnosetests:main',
+            'dconsole = diesel.console:main',
         ],
     },
     install_requires=([
@@ -49,7 +56,7 @@ Other bundled protocols include MongoDB, Riak, and Redis client libraries.
         "twiggy",
         "pyopenssl",
         "flask",
-        "http-parser",
+        "http-parser >= 0.7.12",
         "dnspython",
     ] + additional_requires),
     )

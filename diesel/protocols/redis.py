@@ -1,6 +1,6 @@
 from contextlib import contextmanager
 from diesel import (Client, call, until_eol, receive,
-                    fire, send, first)
+                    fire, send, first, fork, sleep)
 from diesel.util.queue import Queue, QueueTimeout
 import time
 import operator as op
@@ -18,11 +18,17 @@ REDIS_PORT = 6379
 class RedisError(Exception): pass
 
 class RedisClient(Client):
-    def __init__(self, host='localhost', port=REDIS_PORT, **kw):
+    def __init__(self, host='localhost', port=REDIS_PORT, password=None, **kw):
+        self.password = password
         Client.__init__(self, host, port, **kw)
 
     ##################################################
     ### GENERAL OPERATIONS
+    @call
+    def auth(self):
+        self._send('AUTH', self.password)
+        resp = self._get_response()
+        return bool(resp)
     @call
     def exists(self, k):
         self._send('EXISTS', k)
@@ -464,9 +470,14 @@ class RedisClient(Client):
         return bool(resp)
 
     @call
-    def zrange(self, key, start, end):
-        self._send('ZRANGE', key, start, end)
+    def zrange(self, key, start, end, with_scores=False):
+        args = 'ZRANGE', key, start, end
+        if with_scores:
+            args += 'WITHSCORES',
+        self._send(*args)
         resp = self._get_response()
+        if with_scores:
+            return self.__pair_with_scores(resp)
         return resp
 
     @call
@@ -694,16 +705,16 @@ class RedisClient(Client):
     @call
     def get_from_subscriptions(self, wake_sig=None):
         '''Wait for a published message on a subscribed channel.
-        
+
         Returns a tuple consisting of:
-        
+
             * The subscription pattern which matched
                 (the same as the channel for non-glob subscriptions)
             * The channel the message was received from.
             * The message itself.
 
         -- OR -- None, if wake_sig was fired
-        
+
         NOTE: The message will always be a string.  Handle this as you see fit.
         NOTE: subscribe/unsubscribe acks are ignored here
         '''
@@ -721,7 +732,7 @@ class RedisClient(Client):
     @call
     def publish(self, channel, message):
         '''Publish a message on the given channel.
-        
+
         Returns the number of clients that received the message.
         '''
         self._send('PUBLISH', channel, message)
@@ -861,20 +872,62 @@ class RedisTransaction(object):
 
 class RedisTransactionError(Exception): pass
 
+
+class LockNotAcquired(Exception):
+    pass
+
+class RedisLock(object):
+    def __init__(self, client, key, timeout=30):
+        assert timeout >= 2, 'Timeout must be greater than 2 to guarantee the transaction'
+        self.client = client
+        self.key = key
+        self.timeout = timeout
+        self.me = str(uuid.uuid4())
+
+    def __enter__(self):
+        trans = self.client.transaction(watch=[self.key])
+        v = self.client.get(self.key)
+        if v:
+            raise LockNotAcquired()
+        else:
+            try:
+                with trans as t:
+                    t.setex(self.key, self.timeout, self.me)
+
+                def touch():
+                    with RedisClient(self.client.addr, self.client.port) as c:
+                        while self.in_block:
+                            c.expire(self.key, self.timeout)
+                            sleep(self.timeout / 2)
+                self.in_block = True
+                fork(touch)
+            except RedisTransactionError:
+                raise LockNotAcquired()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.in_block = False
+        val = self.client.get(self.key)
+        assert val == self.me, 'Someone else took the lock, panic (val=%s, expected=%s, wha=%s)' % (val, self.me, self.client.get(self.key))
+        self.client.delete(self.key)
+
+
 #########################################
 ## Hub, an abstraction of sub behavior, etc
 class RedisSubHub(object):
-    def __init__(self, host='127.0.0.1', port=REDIS_PORT):
+    def __init__(self, host='127.0.0.1', port=REDIS_PORT, password=None):
         self.host = host
         self.port = port
+        self.password= password
         self.sub_wake_signal = uuid.uuid4().hex
         self.sub_adds = []
         self.sub_rms = []
         self.subs = {}
 
     def make_client(self):
-        client = RedisClient(self.host, self.port)
-        return  client 
+        client = RedisClient(self.host, self.port, self.password)
+        if self.password != None:
+            client.auth()
+        return  client
 
     def __isglob(self, glob):
         return '*' in glob or '?' in glob or ('[' in glob and ']' and glob)
@@ -933,6 +986,25 @@ class RedisSubHub(object):
                                 q.put((key, msg))
 
     @contextmanager
+    def subq(self, classes):
+        if type(classes) not in (set, list, tuple):
+            classes = [classes]
+
+        q = Queue()
+
+        for cls in classes:
+            self.sub_adds.append((cls, q))
+
+        fire(self.sub_wake_signal)
+
+        try:
+            yield q
+        finally:
+            for cls in classes:
+                self.sub_rms.append((cls, q))
+
+
+    @contextmanager
     def sub(self, classes):
         if type(classes) not in (set, list, tuple):
             classes = [classes]
@@ -945,7 +1017,7 @@ class RedisSubHub(object):
                     hb.sub_adds.append((cls, q))
 
                 fire(hb.sub_wake_signal)
-        
+
             def fetch(self, timeout=None):
                 try:
                     qn, msg = q.get(timeout=timeout)

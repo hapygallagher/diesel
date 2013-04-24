@@ -2,6 +2,7 @@
 '''Core implementation/handling of coroutines, protocol primitives,
 scheduling primitives, green-thread procedures.
 '''
+import os
 import socket
 import traceback
 import errno
@@ -168,7 +169,12 @@ class Loop(object):
         self.id = ids.next()
         self.children = set()
         self.parent = None
+        self.deaths = 0
         self.reset()
+        self._clock = 0.0
+        self.clock = 0.0
+        self.tracked = False
+        self.dispatch = self._dispatch
 
     def reset(self):
         self.running = False
@@ -178,10 +184,15 @@ class Loop(object):
         self.connection_stack = []
         self.coroutine = None
 
+    def enable_tracking(self):
+        self.tracked = True
+        self.dispatch = self._dispatch_track
+
     def run(self):
         from diesel.app import ApplicationEnd
         self.running = True
         self.app.running.add(self)
+        parent_died = False
         try:
             self.loop_callable(*self.args, **self.kw)
         except TerminateLoop:
@@ -189,26 +200,29 @@ class Loop(object):
         except (SystemExit, KeyboardInterrupt, ApplicationEnd):
             raise
         except ParentDiedException:
-            pass
+            parent_died = True
         except:
-            log.error("-- Unhandled Exception in local loop <%s> --" % self.loop_label)
-            for line in traceback.format_exc().splitlines():
-                log.error("    " + line)
+            log.trace().error("-- Unhandled Exception in local loop <%s> --" % self.loop_label)
         finally:
             if self.connection_stack:
                 assert len(self.connection_stack) == 1
                 self.connection_stack.pop().close()
+        self.deaths += 1
         self.running = False
         self.app.running.remove(self)
+        # Keep-Alive Laws
+        # ---------------
+        # 1) Parent loop death always kills off children.
+        # 2) Child loops with keep-alive resurrect if their parent didn't die.
+        # 3) If a parent has died, a child always dies.
         self.notify_children()
-        if self.parent and self in self.parent.children:
-            self.parent.children.remove(self)
-            self.parent = None
-
-        if self.keep_alive:
+        if self.keep_alive and not parent_died:
             log.warning("(Keep-Alive loop %s died; restarting)" % self)
             self.reset()
             self.hub.call_later(0.5, self.wake)
+        elif self.parent and self in self.parent.children:
+            self.parent.children.remove(self)
+            self.parent = None
 
     def notify_children(self):
         for c in self.children:
@@ -247,7 +261,8 @@ class Loop(object):
         if make_child:
             self.children.add(l)
             l.parent = self
-        self.app.add_loop(l)
+        l.loop_label = str(f)
+        self.app.add_loop(l, track=self.tracked)
         return l
 
     def parent_died(self):
@@ -301,7 +316,8 @@ class Loop(object):
                 v = self._wait(w, marked_cb(w))
                 if type(v) is EarlyValue:
                     self.clear_pending_events()
-                    return w, v.val
+                    self.reschedule_with_this_value((w, v.val))
+                    break
         return self.dispatch()
 
     def connect(self, client, ip, sock, host, port, timeout=None):
@@ -326,12 +342,18 @@ class Loop(object):
                     ))
                 return
 
-            def finish():
-                client.conn = Connection(fsock, ip)
-                client.connected = True
-                self.hub.schedule(
-                lambda: self.wake()
-                )
+            def finish(e=None):
+                if e:
+                    assert isinstance(e, Exception)
+                    self.hub.schedule(
+                    lambda: self.wake(e)
+                    )
+                else:
+                    client.conn = Connection(fsock, ip)
+                    client.connected = True
+                    self.hub.schedule(
+                    lambda: self.wake()
+                    )
 
             if client.ssl_ctx:
                 fsock = SSL.Connection(client.ssl_ctx, sock)
@@ -410,7 +432,7 @@ class Loop(object):
     def wait(self, event):
         v = self._wait(event)
         if type(v) is EarlyValue:
-            return v.val
+            self.reschedule_with_this_value(v.val)
         return self.dispatch()
 
     def _wait(self, event, cb_maker=identity):
@@ -421,16 +443,35 @@ class Loop(object):
             self.hub.schedule(call_in)
         v = self.app.waits.wait(self, event)
         if type(v) is EarlyValue:
-            self.sleep()
             return v
         self.fire_handlers[v] = cb
 
     def fire(self, event, value=None):
         self.app.waits.fire(event, value)
 
-    def dispatch(self):
+    def os_time(self):
+        usage = os.times()
+        return usage[0] + usage[1]
+
+    def start_clock(self):
+        self._clock = self.os_time()
+
+    def update_clock(self):
+        now = self.os_time()
+        self.clock += (now - self._clock)
+        self._clock = now
+
+    def clocktime(self):
+        self.update_clock()
+        return self.clock
+
+    def _dispatch(self):
         r = self.app.runhub.switch()
         return r
+
+    def _dispatch_track(self):
+        self.update_clock()
+        return self._dispatch()
 
     def wake_fire(self, value=ContinueNothing):
         assert self.fire_due, "wake_fire called when fire wasn't due!"
@@ -441,6 +482,9 @@ class Loop(object):
         '''Wake up this loop.  Called by the main hub to resume a loop
         when it is rescheduled.
         '''
+        if self.tracked:
+            self.start_clock()
+
         global current_loop
 
         # if we have a fire pending,
@@ -530,6 +574,11 @@ class ConnectedLoop(Loop):
             l.owns_connection = False
         self.app.add_loop(l)
         return l
+
+    def reschedule_with_this_value(self, value):
+        def delayed_call():
+            self.wake(value)
+        self.hub.schedule(delayed_call, True)
 
 class Connection(object):
     def __init__(self, sock, addr):

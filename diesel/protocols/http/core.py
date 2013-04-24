@@ -1,13 +1,14 @@
 # vim:ts=4:sw=4:expandtab
 '''HTTP/1.1 implementation of client and server.
 '''
+
 import cStringIO
 import os
 import urllib
+import time
 from datetime import datetime
 from urlparse import urlparse
 from flask import Request, Response
-from collections import defaultdict
 from OpenSSL import SSL
 
 utcnow = datetime.utcnow
@@ -17,7 +18,7 @@ try:
 except ImportError:
     from http_parser.pyparser import HttpParser
 
-from diesel import until, until_eol, receive, ConnectionClosed, send, log
+from diesel import receive, ConnectionClosed, send, log, Client, call, first
 
 SERVER_TAG = 'diesel-http-server'
 
@@ -54,10 +55,21 @@ class HttpServer(object):
     '''An HTTP/1.1 implementation of a server.
     '''
     def __init__(self, request_handler):
-        '''`request_handler` is a callable that takes
-        an HttpRequest object and generates a response.
+        '''Create an HTTP server that calls `request_handler` on requests.
+
+        `request_handler` is a callable that takes a `Request` object and
+        generates a `Response`.
+
+        To support WebSockets, if the `Response` generated has a `status_code` of
+        101 (Switching Protocols) and the `Response` has a `new_protocol` method,
+        it will be called to handle the remainder of the client connection.
+
         '''
         self.request_handler = request_handler
+
+    def on_service_init(self, service):
+        '''Called when this connection handler is connected to a Service.'''
+        self.port = service.port
 
     def __call__(self, addr):
         '''Since an instance of HttpServer is passed to the Service
@@ -81,6 +93,10 @@ class HttpServer(object):
                     data = receive()
 
                 env = h.get_wsgi_environ()
+                if 'HTTP_CONTENT_LENGTH' in env:
+                    env['CONTENT_LENGTH'] = env.pop("HTTP_CONTENT_LENGTH")
+                if 'HTTP_CONTENT_TYPE' in env:
+                    env['CONTENT_TYPE'] = env.pop("HTTP_CONTENT_TYPE")
 
                 env.update({
                     'wsgi.version' : (1,0),
@@ -90,8 +106,13 @@ class HttpServer(object):
                     'wsgi.multithread' : False,
                     'wsgi.multiprocess' : False,
                     'wsgi.run_once' : False,
+                    'REMOTE_ADDR' : addr[0],
+                    'SERVER_NAME' : HOSTNAME,
+                    'SERVER_PORT': str(self.port),
                     })
                 req = Request(env)
+                if req.headers.get('Connection', '').lower() == 'upgrade':
+                    req.data = data
 
                 resp = self.request_handler(req)
                 if 'Server' not in resp.headers:
@@ -107,6 +128,11 @@ class HttpServer(object):
                     resp.headers.get('Connection', '').lower() == "close" or \
                     resp.headers.get('Content-Length') == None:
                     return
+
+                # Switching Protocols
+                if resp.status_code == 101 and hasattr(resp, 'new_protocol'):
+                    resp.new_protocol(req)
+                    break
 
             except ConnectionClosed:
                 break
@@ -128,9 +154,6 @@ class HttpServer(object):
             for i in resp.iter_encoded():
                 send(i)
 
-import time
-from diesel import Client, call, sleep, first
-
 class HttpRequestTimeout(Exception): pass
 
 class TimeoutHandler(object):
@@ -148,7 +171,12 @@ class TimeoutHandler(object):
         raise HttpRequestTimeout()
 
 def cgi_name(n):
-    return 'HTTP_' + n.upper().replace('-', '_')
+    if n.lower() in ('content-type', 'content-length'):
+        # Certain headers are defined in CGI as not having an HTTP
+        # prefix.
+        return n.upper().replace('-', '_')
+    else:
+        return 'HTTP_' + n.upper().replace('-', '_')
 
 class HttpClient(Client):
     '''An HttpClient instance that issues 1.1 requests,
@@ -159,7 +187,7 @@ class HttpClient(Client):
     '''
     url_scheme = "http"
     @call
-    def request(self, method, url, headers={}, body=None, timeout=None):
+    def request(self, method, url, headers=None, body=None, timeout=None):
         '''Issues a `method` request to `path` on the
         connected server.  Sends along `headers`, and
         body.
@@ -168,11 +196,18 @@ class HttpClient(Client):
         for example.  It will set Content-Length,
         however.
         '''
+        headers = headers or {}
         url_info = urlparse(url)
         fake_wsgi = dict(
-        (cgi_name(n), v) for n, v in headers.iteritems())
+        (cgi_name(n), str(v).strip()) for n, v in headers.iteritems())
+
+        if body and 'CONTENT_LENGTH' not in fake_wsgi:
+            # If the caller hasn't set their own Content-Length but submitted
+            # a body, we auto-set the Content-Length header here.
+            fake_wsgi['CONTENT_LENGTH'] = str(len(body))
+
         fake_wsgi.update({
-            'HTTP_METHOD' : method,
+            'REQUEST_METHOD' : method,
             'SCRIPT_NAME' : '',
             'PATH_INFO' : url_info[2],
             'QUERY_STRING' : url_info[4],
@@ -188,7 +223,11 @@ class HttpClient(Client):
 
         timeout_handler = TimeoutHandler(timeout or 60)
 
-        send('%s %s HTTP/1.1\r\n%s' % (req.method, req.url, str(req.headers)))
+        url = str(req.path)
+        if req.query_string:
+            url += '?' + str(req.query_string)
+
+        send('%s %s HTTP/1.1\r\n%s' % (req.method, url, str(req.headers)))
 
         if body:
             send(body)

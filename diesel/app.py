@@ -1,6 +1,9 @@
 # vim:ts=4:sw=4:expandtab
 '''The main Application and Service classes
 '''
+import os
+import gc
+import cProfile
 from OpenSSL import SSL
 import socket
 import traceback
@@ -14,6 +17,9 @@ from diesel.security import ssl_async_handshake
 from diesel import runtime
 from diesel.events import WaitPool
 import ipdb
+
+
+YES_PROFILE = ['1', 'on', 'true', 'yes']
 
 class ApplicationEnd(Exception): pass
 
@@ -43,6 +49,14 @@ class Application(object):
         '''Start up an Application--blocks until the program ends
         or .halt() is called.
         '''
+        profile = os.environ.get('DIESEL_PROFILE', '').lower() in YES_PROFILE
+        track_gc = os.environ.get('TRACK_GC', '').lower() in YES_PROFILE
+        track_gc_leaks = os.environ.get('TRACK_GC_LEAKS', '').lower() in YES_PROFILE
+        if track_gc:
+            gc.set_debug(gc.DEBUG_STATS)
+        if track_gc_leaks:
+            gc.set_debug(gc.DEBUG_LEAK)
+
         self._run = True
         log.warning('Starting diesel <{0}>', self.hub.describe)
 
@@ -54,13 +68,14 @@ class Application(object):
             self.hub.schedule(l.wake)
 
         self.setup()
-        def main():
+
+        def _main():
             while self._run:
                 try:
                     self.hub.handle_events()
                 except SystemExit:
                     log.warning("-- SystemExit raised.. exiting main loop --")
-                    break
+                    raise
                 except KeyboardInterrupt:
                     log.warning("-- KeyboardInterrupt raised.. exiting main loop --")
                     if __debug__:
@@ -75,7 +90,26 @@ class Application(object):
 
             log.info('Ending diesel application')
             runtime.current_app = None
-        self.runhub = greenlet(main)
+
+        def _profiled_main():
+            log.warning("(Profiling with cProfile)")
+
+            # NOTE: Scoping Issue:
+            # Have to rebind _main to _real_main so it shows up in locals().
+            _real_main = _main
+            config = {'sort':1}
+            statsfile = os.environ.get('DIESEL_PSTATS', None)
+            if statsfile:
+                config['filename'] = statsfile
+            try:
+                cProfile.runctx('_real_main()', globals(), locals(), **config)
+            except TypeError, e:
+                if "sort" in e.args[0]:
+                    del config['sort']
+                    cProfile.runctx('_real_main()', globals(), locals(), **config)
+                else: raise e
+
+        self.runhub = greenlet(_main if not profile else _profiled_main)
         self.runhub.switch()
 
     def add_service(self, service):
@@ -92,11 +126,14 @@ class Application(object):
         else:
             self._services.append(service)
 
-    def add_loop(self, loop, front=False, keep_alive=False):
+    def add_loop(self, loop, front=False, keep_alive=False, track=False):
         '''Add a Loop instance to this Application.
 
         The loop will be started when the Application is run().
         '''
+        if track:
+            loop.enable_tracking()
+
         if keep_alive:
             loop.keep_alive = True
 
@@ -128,7 +165,7 @@ class Service(object):
     implemented by a passed connection handler.
     '''
     LQUEUE_SIZ = 500
-    def __init__(self, connection_handler, port, iface='', ssl_ctx=None):
+    def __init__(self, connection_handler, port, iface='', ssl_ctx=None, track=False):
         '''Given a protocol-implementing callable `connection_handler`,
         handle connections on port `port`.
 
@@ -140,6 +177,12 @@ class Service(object):
         self.connection_handler = connection_handler
         self.application = None
         self.ssl_ctx = ssl_ctx
+        self.track = track
+        # Call this last so the connection_handler has a fully-instantiated
+        # Service instance at its disposal.
+        if hasattr(connection_handler, 'on_service_init'):
+            if callable(connection_handler.on_service_init):
+                connection_handler.on_service_init(self)
 
     def handle_cannot_bind(self, reason):
         log.critical("service at {0}:{1} cannot bind: {2}",
@@ -185,7 +228,7 @@ class Service(object):
             c = Connection(sock, addr)
             l = Loop(self.connection_handler, addr)
             l.connection_stack.append(c)
-            runtime.current_app.add_loop(l)
+            runtime.current_app.add_loop(l, track=self.track)
         if self.ssl_ctx:
             sock = SSL.Connection(self.ssl_ctx, sock)
             sock.set_accept_state()
