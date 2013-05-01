@@ -44,10 +44,10 @@ class ReliableHeader(object):
 #        else:
 #            return ReliableHeader.max_usr_len
 
-    def __init__(self, seq, msg_len, ack, ack_bits, multi_seq_id = -1, timestamp = -1.0):
+    def __init__(self, seq, msg_len, ack_seq, ack_bits, multi_seq_id = -1, timestamp = -1.0):
         self.seq = seq
         self.msg_len = msg_len
-        self.ack = ack
+        self.ack_seq = ack_seq
         self.ack_bits = ack_bits
         self.timestamp = timestamp
         self.multi_seq_id = multi_seq_id
@@ -88,7 +88,7 @@ class ReliableHeader(object):
         return self.multi_seq_id >= 0
 
     def to_data(self):
-        return ReliableHeader.generate_header(self.seq, self.msg_len, self.ack, self.ack_bits, self.multi_seq_id, self.timestamp)
+        return ReliableHeader.generate_header(self.seq, self.msg_len, self.ack_seq, self.ack_bits, self.multi_seq_id, self.timestamp)
 
     @staticmethod
     def calc_num_packets(msg_len):
@@ -358,6 +358,8 @@ class ReliableUDPClientConnection(UDPClientConnection):
             self.last_msg_dt = 0.0
 
             self.acks = list()
+            self.last_gen_ack = -1
+            self.cached_ack_bits = 0
 
             self.sentQueue = ReliableUDPClientConnection.ReliabilitySystem.PacketQueue()
             self.pendingAckQueue = ReliableUDPClientConnection.ReliabilitySystem.PacketQueue()
@@ -389,6 +391,8 @@ class ReliableUDPClientConnection(UDPClientConnection):
             self.receivedQueue.append(info)
             if is_seq_more_recent(seq, self.remote_seq): #remote_msg_seq > self.remote_seq:
                 self.remote_seq = seq
+            self.last_gen_ack = -1
+            self.cached_ack_bits = -1
             return True
 
             #self.update()
@@ -444,12 +448,16 @@ class ReliableUDPClientConnection(UDPClientConnection):
 
         def generate_ack_bits(self, ack):
             ack_bits = 0
+            if (self.last_gen_ack == ack):
+                return self.cached_ack_bits
+            self.last_gen_ack = ack
             for recvd in self.receivedQueue:
                 if recvd.seq == ack or is_seq_more_recent(recvd.seq, ack):
                     break
                 bit_index = bit_index_for_sequence(recvd.seq, ack)
                 if bit_index <= 31:
                     ack_bits |= 1 << bit_index
+            self.cached_ack_bits = ack_bits
             return ack_bits
 
         def advance_queue_time(self, dt):
@@ -667,7 +675,7 @@ class ReliableUDPClientConnection(UDPClientConnection):
         if ((self.addr, self.port) != (dgram.addr)):
             ipdb.set_trace()
         log.fields(conn=self.conn_info).debug("processing ack for (%s, %s)" % (self.addr, self.port))
-        self.reliability.process_ack(header.ack, header.ack_bits)
+        self.reliability.process_ack(header.ack_seq, header.ack_bits)
 
         if (msg_len > ReliableHeader.max_usr_len or msg_len < 0):
             log.fields(conn=self.conn_info).debug("processing as multipacket multipacketid: %d", multi_seq_id)
@@ -731,10 +739,10 @@ class ReliableUDPClientConnection(UDPClientConnection):
                 msg_len_field = total_bytes
 
             log.fields(conn=self.conn_info).debug("gen header multi_seq: %d msg_len %d" % (multi_packet_seq, msg_len_field))
-            ack_seq = self.reliability.remote_seq
+            #ack_seq = self.reliability.remote_seq
             #header = ReliableHeader()
             #header_bytes = ReliableHeader.generate_header(self.reliability.local_seq, msg_len_field, ack_seq, self.reliability.generate_ack_bits(ack_seq), multi_packet_seq)
-            header = ReliableHeader(0, msg_len_field, ack_seq, self.reliability.generate_ack_bits(ack_seq), multi_packet_seq)
+            header = ReliableHeader(-1, msg_len_field, -1, -1, multi_packet_seq)
             #self.reliability.local_seq = seq_add(self.reliability.local_seq, 1) #self.local_seq + 1
             #assert(len(header_bytes + msg_bytes) <= ReliableHeader.max_msg_len)
             #outgoing_dgram = Datagram(header_bytes + msg_bytes, dgram.addr)
