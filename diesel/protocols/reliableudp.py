@@ -18,6 +18,8 @@ import datetime
 
 __epoch = datetime.datetime.utcfromtimestamp(0)
 
+_DEBUG_RELIABLE_UDP = True
+
 def network_time(epoch):
     #TODO: make this check gmtime(0) so it's the same on all platforms
     #return time.time()
@@ -100,29 +102,30 @@ class ReliableHeader(object):
 #        self.time = time
 #        self.size = size
 
+max_seq = ReliableHeader.max_seq
+half_max_seq = ReliableHeader.max_seq / 2
+
 def is_seq_more_recent(seq1, seq2):
-    max_seq = ReliableHeader.max_seq
-    return (((seq1 > seq2) and (seq1 - seq2 <= max_seq/2)) or ((seq2 > seq1) and (seq2 - seq1 > max_seq/2)))
+    cmp_result = seq1 - seq2
+    #return (((seq1 > seq2) and (seq1 - seq2 <= half_max_seq)) or ((seq2 > seq1) and (seq2 - seq1 > half_max_seq)))
+    return (((cmp_result > 0) and (cmp_result <= half_max_seq)) or ((cmp_result < 0) and (-cmp_result > half_max_seq)))
 
 def is_seq_in_range(test, min_test, max_test):
-    max_seq = ReliableHeader.max_seq
-    if (min_test > max_seq/2) and (max_test < max_seq/2):
+    if (min_test > half_max_seq) and (max_test < half_max_seq):
         return (test >= min_test and test <= max_seq) or ( test <= max_test )
     else:
         return test >= min_test and test <= max_test
 
 def seq_add(seq, amount):
     seq = seq + amount
-    max_seq = ReliableHeader.max_seq
     if seq < 0:
         seq += max_seq
-    if seq > ReliableHeader.max_seq:
+    if seq > max_seq:
         seq -= max_seq
     return seq
 
 def bit_index_for_sequence(seq, ack):
     assert(seq != ack)
-    max_seq = ReliableHeader.max_seq
     assert(not is_seq_more_recent(seq, ack))
     if (seq > ack):
         assert(ack < 33)
@@ -149,7 +152,7 @@ class PendingMultiPacketMsg(object):
             self.packets = [None for i in range( self.num_packets)]
             self.packets[0] = initial_msg
             self.multi_seq_id = multi_seq_id
-            log.info("NEW PendingMultipacket ID %d, num_packets %d, FIRST: %d, LAST: %d" % (multi_seq_id, self.num_packets, self.first_seq, self.last_seq))
+            _DEBUG_RELIABLE_UDP and log.info("NEW PendingMultipacket ID %d, num_packets %d, FIRST: %d, LAST: %d" % (multi_seq_id, self.num_packets, self.first_seq, self.last_seq))
 
     def _grow_num_packets(self, new_max):
         curr_num_packets = len(self.packets)
@@ -179,7 +182,7 @@ class PendingMultiPacketMsg(object):
                 return True
         else:
             if self.multi_seq_id == multi_seq_id:
-                log.info("adding to existing PendingMultipacket multi_seq_id %d, msg_len %d" % (multi_seq_id, msg_len))
+                _DEBUG_RELIABLE_UDP and log.info("adding to existing PendingMultipacket multi_seq_id %d, msg_len %d" % (multi_seq_id, msg_len))
                 if msg_len >= 0: # this is the first message
                     self.packets[0] = msg
                     self.first_seq = msg_seq
@@ -209,7 +212,7 @@ class PendingMultiPacketMsg(object):
         for packet in self.packets:
             if packet is None:
                 return False
-        log.info("multipacket complete multiseqid: %d" % self.multi_seq_id)
+        _DEBUG_RELIABLE_UDP and log.info("multipacket complete multiseqid: %d" % self.multi_seq_id)
         return True
 
     def get_msg(self):
@@ -247,7 +250,7 @@ class FlowControl:
                     self.penalty_time *= 2.0
                     if self.penalty_time > 60.0:
                         self.penalty_time = 60.0
-                    log.fields(conn=self.conn_info).info("flow control: dropping to bad mode")
+                    _DEBUG_RELIABLE_UDP and log.fields(conn=self.conn_info).info("flow control: dropping to bad mode")
                     self.good_conditions_time = 0.0
                     self.penalty_reduction_accumulator = 0.0
                     return
@@ -260,7 +263,7 @@ class FlowControl:
                 if self.penalty_time < 1.0:
                     self.penalty_time = 1.0
 
-                log.fields(conn=self.conn_info).debug("flow control: penalty time reduced to %f" % self.penalty_time)
+                _DEBUG_RELIABLE_UDP and log.fields(conn=self.conn_info).debug("flow control: penalty time reduced to %f" % self.penalty_time)
                 self.penalty_accumulator = 0.0
 
         elif self.mode == FlowControl.Mode.Bad:
@@ -270,7 +273,7 @@ class FlowControl:
                 self.good_conditions_time = 0.0
 
             if self.good_conditions_time > self.penalty_time:
-                log.fields(conn=self.conn_info).info("flow control: upgrading to good mode")
+                _DEBUG_RELIABLE_UDP and log.fields(conn=self.conn_info).info("flow control: upgrading to good mode")
                 self.good_conditions_time = 0.0
                 self.penalty_reduction_accumulator = 0.0
                 self.mode = FlowControl.Mode.Good
@@ -286,7 +289,7 @@ class ReliableUDPClientConnection(UDPClientConnection):
 
         EPSILON = 0.001
         MAX_ACK_TIME = 0.1
-        MISSING_MSG_RESEND_TIME = 1.0
+        MISSING_MSG_RESEND_TIME = .75
 
         class PacketData(object):
             def __init__(self, seq, time, data):
@@ -404,7 +407,7 @@ class ReliableUDPClientConnection(UDPClientConnection):
             if is_seq_more_recent(ack_seq, self.latest_ack_seq):
                 self.latest_ack_seq = ack_seq
             if self.pendingAckQueue:
-                log.fields(conn=self.conn_info).debug("pre process_ack pending acks: %s" % self.pendingAckQueue)
+                _DEBUG_RELIABLE_UDP and log.fields(conn=self.conn_info).debug("pre process_ack pending acks: %s" % self.pendingAckQueue)
                 new_queue = ReliableUDPClientConnection.ReliabilitySystem.PacketQueue()
                 for ack_info in self.pendingAckQueue:
                     acked = False
@@ -416,7 +419,7 @@ class ReliableUDPClientConnection(UDPClientConnection):
                             acked = (ack_bits >> bit_index) & 1
 
                     if acked:
-                        log.fields(conn=self.conn_info).debug("PROCESSED process_ack for packet %d" % ack_info.seq)
+                        _DEBUG_RELIABLE_UDP and log.fields(conn=self.conn_info).debug("PROCESSED process_ack for packet %d" % ack_info.seq)
                         self.rtt += (ack_info.time - self.rtt) * 0.1
                         self.ackedQueue.insert_sorted(ack_info)
                         self.acks.append(ack_info.seq)
@@ -424,17 +427,19 @@ class ReliableUDPClientConnection(UDPClientConnection):
                     else:
                         new_queue.append(ack_info)
                 self.pendingAckQueue = new_queue
-                log.fields(conn=self.conn_info).debug("process_ack pending acks: %s" % self.pendingAckQueue)
+                _DEBUG_RELIABLE_UDP and log.fields(conn=self.conn_info).debug("process_ack pending acks: %s" % self.pendingAckQueue)
 
         def process_missing_msgs(self):
             missed_msgs = []
             new_pending_acks = ReliableUDPClientConnection.ReliabilitySystem.PacketQueue()
 
-            #NOTE: trying new method, where I check the latest seq received & go back 33 (since that's how many can be ack'd. if it hasn't been acked by then it 'can't' be by any later msgs)
+            #NOTE: trying new method, where I check the latest seq received & go back 33 (since that's how many can be ack'd. if it hasn't been acked by then it 'can't' be by any later msgs (ignoring possiblity of delayed messages coming through later))
             oldest_ackable = seq_add(self.latest_ack_seq, -33)
+            print "latest_ack_seq = %d, oldest ackable: %d" % (self.latest_ack_seq, oldest_ackable)
 
             for pending in self.pendingAckQueue:
-                if is_seq_more_recent(oldest_ackable, pending.seq): #TODO: need timeout too? ->  or pending.time > ReliableUDPClientConnection.ReliabilitySystem.MISSING_MSG_RESEND_TIME:
+                #if is_seq_more_recent(oldest_ackable, pending.seq): #TODO: need timeout too? ->  or pending.time > ReliableUDPClientConnection.ReliabilitySystem.MISSING_MSG_RESEND_TIME:
+                if is_seq_more_recent(oldest_ackable, pending.seq) and pending.time > ReliableUDPClientConnection.ReliabilitySystem.MISSING_MSG_RESEND_TIME:
                     if len(pending.data) <= ReliableHeader.struct_size:
                         #NOTE: skipping resending simple empty ack msgs
                         continue
@@ -461,19 +466,32 @@ class ReliableUDPClientConnection(UDPClientConnection):
             return ack_bits
 
         def advance_queue_time(self, dt):
-            for info in self.sentQueue:
-                info.time += dt
-            for info in self.pendingAckQueue:
-                info.time += dt
-            for info in self.receivedQueue:
-                info.time += dt
-            for info in self.ackedQueue:
-                info.time += dt
+            def __update_time(packet_data):
+                packet_data.time += dt
+                return None
+
+            #self.sentQueue =
+            map(__update_time, self.sentQueue)
+            #self.pendingAckQueue =
+            map(__update_time, self.pendingAckQueue)
+            #self.receivedQueue =
+            map(__update_time, self.receivedQueue)
+            #self.ackedQueue =
+            map(__update_time, self.ackedQueue)
+
+            #for info in self.sentQueue:
+            #    info.time += dt
+            #for info in self.pendingAckQueue:
+            #    info.time += dt
+            #for info in self.receivedQueue:
+            #    info.time += dt
+            #for info in self.ackedQueue:
+            #    info.time += dt
 
         def update_queues(self):
             while self.sentQueue and (self.sentQueue[0].time > (self.rtt_max + self.EPSILON) ):
                 sent = self.sentQueue.pop(0)
-                log.fields(conn=self.conn_info).debug("SENTQUEUE: removing seq %d" % sent.seq)
+                _DEBUG_RELIABLE_UDP and log.fields(conn=self.conn_info).debug("SENTQUEUE: removing seq %d" % sent.seq)
 
             if self.receivedQueue:
                 last_seq = self.receivedQueue[-1].seq
@@ -484,15 +502,15 @@ class ReliableUDPClientConnection(UDPClientConnection):
 
                 while self.receivedQueue and not is_seq_more_recent(self.receivedQueue[-1].seq, min_seq):
                     recd = self.receivedQueue.pop(0)
-                    log.fields(conn=self.conn_info).debug("RECDQUEUE: removing seq %d" % recd.seq)
+                    _DEBUG_RELIABLE_UDP and log.fields(conn=self.conn_info).debug("RECDQUEUE: removing seq %d" % recd.seq)
 
             while self.ackedQueue and self.ackedQueue[-1].time > (self.rtt_max * 2 - self.EPSILON):
                 ackd = self.ackedQueue.pop(0)
-                log.fields(conn=self.conn_info).debug("ACKDQUEUE: removing seq %d" % ackd.seq)
+                _DEBUG_RELIABLE_UDP and log.fields(conn=self.conn_info).debug("ACKDQUEUE: removing seq %d" % ackd.seq)
 
             while self.pendingAckQueue and self.pendingAckQueue[-1].time > (self.rtt_max + self.EPSILON):
                 packd = self.pendingAckQueue.pop(0)
-                log.fields(conn=self.conn_info).debug("PACKDQUEUE: removing seq %d" % packd.seq)
+                _DEBUG_RELIABLE_UDP and log.fields(conn=self.conn_info).debug("PACKDQUEUE: removing seq %d" % packd.seq)
                 self.lost_packets += 1
 
         def update_stats(self):
@@ -556,7 +574,7 @@ class ReliableUDPClientConnection(UDPClientConnection):
         header.ack_seq = self.reliability.remote_seq
         header.ack_bits = self.reliability.generate_ack_bits(header.ack_seq)
         header.timestamp = network_time(self.network_epoch)
-        log.fields(conn=self.conn_info).debug("_internal_queue_outgoing, sending msg seq %d multi_seq %d msg_len %d network time %f" % (header.seq, header.multi_seq_id, header.msg_len, header.timestamp))
+        _DEBUG_RELIABLE_UDP and log.fields(conn=self.conn_info).debug("_internal_queue_outgoing, sending msg seq %d multi_seq %d msg_len %d network time %f" % (header.seq, header.multi_seq_id, header.msg_len, header.timestamp))
         header_bytes = header.to_data()
         outgoing_dgram = Datagram(header_bytes + msg_data, (self.addr, self.port))
         self.reliability.packet_sent(self.reliability.local_seq, outgoing_dgram)
@@ -589,18 +607,7 @@ class ReliableUDPClientConnection(UDPClientConnection):
                     #ipdb.set_trace()
                 send_delay = 0.0
             #print curr_max_wait_time
-            result = None
-            #try:
-            result = diesel.first(sleep=curr_max_wait_time, waits = [self.pending_resends, self.unsent_queue])
-            if result == True:
-                evt = 'sleep'
-                log.fields(conn=self.conn_info).error("first returned TRUE.")
-            else:
-                evt, data = result
-            #except Exception, e:
-            #    ipdb.set_trace()
-            #    evt, data = diesel.first(sleep=curr_max_wait_time, waits = [self.pending_resends, self.unsent_queue])
-            #    raise
+            evt, data = diesel.first(sleep=curr_max_wait_time, waits = [self.pending_resends, self.unsent_queue])
 
             curr_time = time.clock()
             dt = curr_time - prev_time
@@ -634,7 +641,7 @@ class ReliableUDPClientConnection(UDPClientConnection):
                 #header.seq = next_seq
                 #self.reliability.local_seq = seq_add(next_seq, 1)
                 #log.fields(conn=self.conn_info).info("resending unacked msg, prev seq: %d, new seq %d len %d" % (prev_seq, next_seq, header.msg_len))
-                log.fields(conn=self.conn_info).info("resending unacked msg, prev seq: %d, len %d" % (prev_seq, header.msg_len))
+                _DEBUG_RELIABLE_UDP and log.fields(conn=self.conn_info).info("resending unacked msg, prev seq: %d, len %d" % (prev_seq, header.msg_len))
                 #dgram = header.to_data() + msgdata
                 #self._internal_queue_outgoing(dgram, 1)
                 #self._internal_queue_msg(dgram, 1)
@@ -665,25 +672,23 @@ class ReliableUDPClientConnection(UDPClientConnection):
         remote_msg_seq = header.seq
         msg_len = header.msg_len
         multi_seq_id = header.multi_seq_id
-        log.fields(conn=self.conn_info).info("recvd dgram : remote_seq %d, msg_len %d" % (remote_msg_seq, msg_len))
 
         self.reliability.packet_received(header.seq, dgram)
         assert(header.timestamp >= 0.0)
 
         time_diff = time_received - (header.timestamp + self.reliability.rtt)
-        log.fields(conn=self.conn_info).debug("recvd dgram, ts: %f, rtt: %f timediff: %f" % (header.timestamp, self.reliability.rtt, time_diff))
-        if ((self.addr, self.port) != (dgram.addr)):
+        _DEBUG_RELIABLE_UDP and log.fields(conn=self.conn_info).debug("recvd dgram, remote_seq %d, msg_len %d ts: %f, rtt: %f timediff: %f" % (remote_msg_seq, msg_len, header.timestamp, self.reliability.rtt, time_diff))
+        if __debug__ and ((self.addr, self.port) != (dgram.addr)):
             ipdb.set_trace()
-        log.fields(conn=self.conn_info).debug("processing ack for (%s, %s)" % (self.addr, self.port))
         self.reliability.process_ack(header.ack_seq, header.ack_bits)
 
         if (msg_len > ReliableHeader.max_usr_len or msg_len < 0):
-            log.fields(conn=self.conn_info).debug("processing as multipacket multipacketid: %d", multi_seq_id)
+            _DEBUG_RELIABLE_UDP and log.fields(conn=self.conn_info).debug("processing as multipacket multipacketid: %d", multi_seq_id)
             processed_msg = False
             for pending in self.pending_multipackets:
                 if pending.needs_msg(multi_seq_id, remote_msg_seq, msg_len, dgram):
                     processed_msg = True
-                    log.fields(conn=self.conn_info).debug("adding to pending multipackets")
+                    #log.fields(conn=self.conn_info).debug("adding to pending multipackets")
                     if pending.is_complete():
                         #ipdb.set_trace()
                         complete_msg = pending.get_msg()
@@ -691,7 +696,7 @@ class ReliableUDPClientConnection(UDPClientConnection):
                         self.pending_multipackets.remove(pending)
                         break
             if not processed_msg:
-                log.fields(conn=self.conn_info).debug("new pending multipackets")
+                #log.fields(conn=self.conn_info).debug("new pending multipackets")
                 pending_multipacket = PendingMultiPacketMsg(multi_seq_id, remote_msg_seq, msg_len, dgram)
                 self.pending_multipackets.append(pending_multipacket)
         else:
@@ -717,7 +722,7 @@ class ReliableUDPClientConnection(UDPClientConnection):
             multi_packet_seq = self.multi_packet_seq
             self.multi_packet_seq = seq_add(self.multi_packet_seq, 1)
             max_msg_bytes = ReliableHeader.max_multi_usr_len
-            if __debug__:
+            if _DEBUG_RELIABLE_UDP and __debug__:
                 num_packets = ReliableHeader.calc_num_packets(total_bytes)
                 log.fields(conn=self.conn_info).info("gen header multi_seq: %d msg_len %d" % (multi_packet_seq, num_packets))
 
@@ -727,7 +732,7 @@ class ReliableUDPClientConnection(UDPClientConnection):
             curr_len = total_bytes - curr_end_idx
             if (curr_len > max_msg_bytes):
                 curr_len = max_msg_bytes
-            log.fields(conn=self.conn_info).debug("curr len %d" % curr_len)
+            _DEBUG_RELIABLE_UDP and log.fields(conn=self.conn_info).debug("curr len %d" % curr_len)
 
             curr_end_idx = curr_start_idx + curr_len
 
@@ -738,7 +743,7 @@ class ReliableUDPClientConnection(UDPClientConnection):
             else:
                 msg_len_field = total_bytes
 
-            log.fields(conn=self.conn_info).debug("gen header multi_seq: %d msg_len %d" % (multi_packet_seq, msg_len_field))
+            _DEBUG_RELIABLE_UDP and log.fields(conn=self.conn_info).debug("gen header multi_seq: %d msg_len %d" % (multi_packet_seq, msg_len_field))
             #ack_seq = self.reliability.remote_seq
             #header = ReliableHeader()
             #header_bytes = ReliableHeader.generate_header(self.reliability.local_seq, msg_len_field, ack_seq, self.reliability.generate_ack_bits(ack_seq), multi_packet_seq)
