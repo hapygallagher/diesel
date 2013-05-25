@@ -125,34 +125,38 @@ def seq_add(seq, amount):
     return seq
 
 def bit_index_for_sequence(seq, ack):
-    assert(seq != ack)
+    #assert(seq != ack)
     assert(not is_seq_more_recent(seq, ack))
     if (seq > ack):
-        assert(ack < 33)
+        #assert(ack < 33)
+        assert(ack < 32)
         assert(max_seq >= seq)
-        return ack + (max_seq - seq)
+        return ack + 1 + (max_seq - seq)
     else:
-        assert(ack >= 1)
-        assert(seq <= ack - 1)
-        return ack - 1 - seq
+        #assert(ack >= 1)
+        assert(ack >= 0)
+        #assert(seq <= ack - 1)
+        assert(seq <= ack)
+        #return ack - 1 - seq
+        return ack - seq
 
 class PendingMultiPacketMsg(object):
     def __init__(self, multi_seq_id, msg_seq, msg_len, initial_msg):
         if (msg_len < 0):
-            self.first_seq = seq_add(msg_seq, -msg_len) #msg_seq + (-msg_len)
-            self.last_seq = -1
+            #first_seq = seq_add(msg_seq, -msg_len) #msg_seq + (-msg_len)
+            #self.last_seq = -1
             self.num_packets = -1
             self.packets = [None for i in range(-msg_len + 1)]
             self.packets[-msg_len] = initial_msg
             self.multi_seq_id = multi_seq_id
         else:
-            self.first_seq = msg_seq
+            #self.first_seq = msg_seq
             self.num_packets = ReliableHeader.calc_num_packets(msg_len)
-            self.last_seq = seq_add(msg_seq, self.num_packets) #msg_seq + self.num_packets
+            #self.last_seq = seq_add(msg_seq, self.num_packets) #msg_seq + self.num_packets
             self.packets = [None for i in range( self.num_packets)]
             self.packets[0] = initial_msg
             self.multi_seq_id = multi_seq_id
-            _DEBUG_RELIABLE_UDP and log.info("NEW PendingMultipacket ID %d, num_packets %d, FIRST: %d, LAST: %d" % (multi_seq_id, self.num_packets, self.first_seq, self.last_seq))
+            _DEBUG_RELIABLE_UDP and log.info("NEW PendingMultipacket ID %d, num_packets %d, FIRST: %d, LAST: %d" % (multi_seq_id, self.num_packets, msg_seq, msg_seq - 1 + self.num_packets))
 
     def _grow_num_packets(self, new_max):
         curr_num_packets = len(self.packets)
@@ -168,8 +172,9 @@ class PendingMultiPacketMsg(object):
             assert(len(self.packets) == new_max)
 
     def needs_msg(self, multi_seq_id, msg_seq, msg_len, msg):
-        if self.num_packets > 0:
-            if is_seq_in_range(msg_seq, self.first_seq, self.last_seq) and multi_seq_id == self.multi_seq_id:
+        if self.multi_seq_id == multi_seq_id:
+            if self.num_packets > 0 and msg_len < 0:
+            #if is_seq_in_range(msg_seq, self.first_seq, self.last_seq) and multi_seq_id == self.multi_seq_id:
                 #assert(msg_len < 0) # should only be here if we have already got the first packet!
                 try:
                     if self.packets[-msg_len] is None:
@@ -180,16 +185,16 @@ class PendingMultiPacketMsg(object):
                     ipdb.set_trace()
                     raise
                 return True
-        else:
-            if self.multi_seq_id == multi_seq_id:
+            else:
                 _DEBUG_RELIABLE_UDP and log.info("adding to existing PendingMultipacket multi_seq_id %d, msg_len %d" % (multi_seq_id, msg_len))
                 if msg_len >= 0: # this is the first message
                     self.packets[0] = msg
-                    self.first_seq = msg_seq
+                    #self.first_seq = msg_seq
                     self.num_packets = ReliableHeader.calc_num_packets(msg_len)
                     self.multi_seq_id = multi_seq_id
                     self._grow_num_packets(self.num_packets)
-                    self.last_seq = seq_add(self.first_seq, self.num_packets) #self.first_seq + self.num_packets
+                    #self.last_seq = seq_add(self.first_seq, self.num_packets) #self.first_seq + self.num_packets
+                    _DEBUG_RELIABLE_UDP and log.info("NEW FIRST PACKET FOR: PendingMultipacket ID %d, num_packets %d, FIRST: %d, LAST: %d" % (self.multi_seq_id, self.num_packets, msg_seq, msg_seq - 1 + self.num_packets))
                 else:
                     #NOTE: we've already received a packet, which also wasn't the first packet, and neither is this. add to our incomplete packets
                     check_max = -msg_len + 1
@@ -217,9 +222,14 @@ class PendingMultiPacketMsg(object):
 
     def get_msg(self):
         msg = ""
-        for packet in self.packets:
-            assert(packet is not None)
-            msg += packet
+        #for packet in self.packets:
+        #    assert(packet is not None)
+        #    msg += packet
+        num_packets = len(self.packets)
+        for i in range(num_packets - 1):
+            if (len(self.packets[i]) != ReliableHeader.max_multi_usr_len):
+                ipdb.set_trace()
+        msg = msg.join(self.packets)
         return msg
 
 class FlowControl:
@@ -288,7 +298,7 @@ class ReliableUDPClientConnection(UDPClientConnection):
     class ReliabilitySystem(object):
 
         EPSILON = 0.001
-        MAX_ACK_TIME = 0.1
+        MAX_ACK_TIME = 0.2
         MISSING_MSG_RESEND_TIME = .75
 
         class PacketData(object):
@@ -355,7 +365,7 @@ class ReliableUDPClientConnection(UDPClientConnection):
 
             self.sent_bandwidth = 0.0
             self.ackd_bandwidth = 0.0
-            self.rtt_max = 1.0 # max permitted RTT
+            self.rtt_max = 2.0 # max permitted RTT
             self.rtt = self.rtt_max / 2.0
 
             self.last_msg_dt = 0.0
@@ -404,16 +414,17 @@ class ReliableUDPClientConnection(UDPClientConnection):
             #from net.settings import IS_CLIENT
             #if not IS_CLIENT:
             #    ipdb.set_trace()
+            _DEBUG_RELIABLE_UDP and log.fields(conn=self.conn_info).debug("pre process_ack pending acks ack_seq %d bits %x : %s" % (ack_seq, ack_bits, self.pendingAckQueue))
             if is_seq_more_recent(ack_seq, self.latest_ack_seq):
                 self.latest_ack_seq = ack_seq
             if self.pendingAckQueue:
-                _DEBUG_RELIABLE_UDP and log.fields(conn=self.conn_info).debug("pre process_ack pending acks: %s" % self.pendingAckQueue)
                 new_queue = ReliableUDPClientConnection.ReliabilitySystem.PacketQueue()
                 for ack_info in self.pendingAckQueue:
                     acked = False
-                    if ack_info.seq == ack_seq:
-                        acked = True
-                    elif not is_seq_more_recent(ack_info.seq, ack_seq):
+                    #if ack_info.seq == ack_seq and bit_index_for_sequence(ack_info.seq, ack_seq):
+                    #    acked = True
+                    #el
+                    if not is_seq_more_recent(ack_info.seq, ack_seq) or ack_info.seq == ack_seq:
                         bit_index = bit_index_for_sequence(ack_info.seq, ack_seq)
                         if (bit_index <= 31):
                             acked = (ack_bits >> bit_index) & 1
@@ -434,12 +445,15 @@ class ReliableUDPClientConnection(UDPClientConnection):
             new_pending_acks = ReliableUDPClientConnection.ReliabilitySystem.PacketQueue()
 
             #NOTE: trying new method, where I check the latest seq received & go back 33 (since that's how many can be ack'd. if it hasn't been acked by then it 'can't' be by any later msgs (ignoring possiblity of delayed messages coming through later))
-            oldest_ackable = seq_add(self.latest_ack_seq, -33)
-            print "latest_ack_seq = %d, oldest ackable: %d" % (self.latest_ack_seq, oldest_ackable)
+            #oldest_ackable = seq_add(self.latest_ack_seq, -33)
+            #print "latest_ack_seq = %d, oldest ackable: %d" % (self.latest_ack_seq, oldest_ackable)
+
+            timeout = min(ReliableUDPClientConnection.ReliabilitySystem.MISSING_MSG_RESEND_TIME + self.rtt, self.rtt_max - (self.rtt - self.EPSILON))
 
             for pending in self.pendingAckQueue:
                 #if is_seq_more_recent(oldest_ackable, pending.seq): #TODO: need timeout too? ->  or pending.time > ReliableUDPClientConnection.ReliabilitySystem.MISSING_MSG_RESEND_TIME:
-                if is_seq_more_recent(oldest_ackable, pending.seq) and pending.time > ReliableUDPClientConnection.ReliabilitySystem.MISSING_MSG_RESEND_TIME:
+                #if is_seq_more_recent(oldest_ackable, pending.seq) and
+                if pending.time > timeout:
                     if len(pending.data) <= ReliableHeader.struct_size:
                         #NOTE: skipping resending simple empty ack msgs
                         continue
@@ -457,7 +471,8 @@ class ReliableUDPClientConnection(UDPClientConnection):
                 return self.cached_ack_bits
             self.last_gen_ack = ack
             for recvd in self.receivedQueue:
-                if recvd.seq == ack or is_seq_more_recent(recvd.seq, ack):
+                #if recvd.seq == ack or is_seq_more_recent(recvd.seq, ack):
+                if is_seq_more_recent(recvd.seq, ack):
                     break
                 bit_index = bit_index_for_sequence(recvd.seq, ack)
                 if bit_index <= 31:
@@ -598,7 +613,8 @@ class ReliableUDPClientConnection(UDPClientConnection):
         send_rate = self.flow_control.send_rate()
         while True:
             #TODO: debug timing slower for now
-            curr_max_wait_time = ReliableUDPConnection.MAX_TIME_BETWEEN_ACKS
+            #curr_max_wait_time = ReliableUDPConnection.MAX_TIME_BETWEEN_ACKS
+            curr_max_wait_time = 1.0 / send_rate
             if send_delay > 0.0 and curr_max_wait_time > send_delay:
                 diesel.sleep(send_delay) # can't send until this delay is completed
                 curr_max_wait_time -= send_delay #NOTE: assuming send delay was approx what we said to sleep for.
@@ -616,6 +632,7 @@ class ReliableUDPClientConnection(UDPClientConnection):
             send_accumulator += dt
 
             self.reliability.update(dt) #update latest acks etc.
+            self.flow_control.update(dt, self.reliability.rtt)
 
             next_msg = None
             priority = None
@@ -775,7 +792,7 @@ class ReliableUDPClientConnection(UDPClientConnection):
 
 class ReliableUDPConnection(UDPConnection):
 
-    MAX_TIME_BETWEEN_ACKS = 0.5
+    MAX_TIME_BETWEEN_ACKS = 0.2
 
     def __init__(self, parent, sock, ip=None, port=None, f_connection_loop = None, *args, **kw ):
         super(ReliableUDPConnection, self).__init__(parent, sock, ip, port, f_connection_loop, *args, **kw)
