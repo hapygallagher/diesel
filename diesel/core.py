@@ -104,7 +104,11 @@ def first(*args, **kw):
     return current_loop.first(*args, **kw)
 
 def label(*args, **kw):
-    return current_loop.label(*args, **kw)
+    if current_loop:
+        return current_loop.label(*args, **kw)
+    else:
+        log.warn("diesel.core.label - no current loop")
+        return ""
 
 def fork(*args, **kw):
     return current_loop.fork(False, *args, **kw)
@@ -269,8 +273,12 @@ class Loop(object):
         if self.running:
             self.hub.schedule(lambda: self.wake(ParentDiedException()))
 
-    def label(self, label):
-        self.loop_label = label
+    def label(self, label = None):
+        if label:
+            self.loop_label = label
+            return self.loop_label
+        else:
+            return self.loop_label
 
     def first(self, sleep=None, waits=None,
             receive_any=None, receive=None, until=None, until_eol=None, datagram=None):
@@ -888,9 +896,16 @@ class UDPConnection(UDPSocket):
         #log.info("UDPConnection queued outgoing DONE")
 
     def datagram_loop(self):
+        import datetime
         while True:
             current_loop.connection_stack.append(self)
+            #ipdb.set_trace()
+            last_time = datetime.datetime.utcnow()
             dgram = receive(datagram)
+            elapsed = (datetime.datetime.utcnow() - last_time).total_seconds()
+            if elapsed > 0.2:
+                log.info("datagram receive: slept %f " % elapsed)
+            #ipdb.set_trace()
             current_loop.connection_stack.pop()
             remote_addr = dgram.addr
             client_conn = self.check_child_connection(remote_addr)
@@ -901,34 +916,57 @@ class UDPConnection(UDPSocket):
         '''The low-level handler called by the event hub
         when the socket is ready for reading.
         '''
-        if self.closed:
-            return
-        try:
-            data, addr = self.sock.recvfrom(BUFSIZ)
-            dgram = Datagram(data, addr)
-            #log.debug("(((((UDP CONNECTION received datagram %s" % (str(addr)))
-        except socket.error, e:
-            code, s = e
-            if code in (errno.EAGAIN, errno.EINTR):
+        if self.incoming:
+            ipdb.set_trace()
+        read_dgrams = []
+        read_failed = False
+        while not read_failed:
+            dgram = None
+            if self.closed:
                 return
-            dgram = Datagram('', (None, None))
-        except (SSL.WantReadError, SSL.WantWriteError, SSL.WantX509LookupError):
-            return
-        except SSL.ZeroReturnError:
-            dgram = Datagram('', (None, None))
-        except SSL.SysCallError:
-            dgram = Datagram('', (None, None))
-        except:
-            sys.stderr.write("Unknown Error on recv():\n%s"
-            % traceback.format_exc())
-            dgram = Datagram('', (None, None))
+            try:
+                data, addr = self.sock.recvfrom(BUFSIZ)
+                dgram = Datagram(data, addr)
+                #log.debug("(((((UDP CONNECTION received datagram %s" % (str(addr)))
+            except socket.error, e:
+                code, s = e
+                read_failed = True
+                if not dgram and not read_dgrams and code in (errno.EAGAIN, errno.EINTR):
+                    return
+                if not dgram:
+                    dgram = Datagram('', (None, None))
+            except (SSL.WantReadError, SSL.WantWriteError, SSL.WantX509LookupError):
+                ipdb.set_trace()
+                read_failed = True
+                if not dgram and not read_dgrams:
+                     return
+            except SSL.ZeroReturnError:
+                ipdb.set_trace()
+                read_failed = True
+                dgram = Datagram('', (None, None))
+            except SSL.SysCallError:
+                ipdb.set_trace()
+                read_failed = True
+                dgram = Datagram('', (None, None))
+            except:
+                ipdb.set_trace()
+                read_failed = True
+                sys.stderr.write("Unknown Error on recv():\n%s"
+                % traceback.format_exc())
+                dgram = Datagram('', (None, None))
 
-        if not dgram:
-            self.shutdown(True)
-        elif self.waiting_callback:
+            if not dgram and not read_dgrams:
+                self.shutdown(True)
+            elif not read_failed or not read_dgrams:
+                read_dgrams.append(dgram)
+
+        if self.waiting_callback:
+            dgram = read_dgrams.pop()
+            if read_dgrams:
+                self.incoming.extend(read_dgrams)
             self.waiting_callback(dgram)
         else:
-            self.incoming.append(dgram)
+            self.incoming.extend(read_dgrams)
 
     def cleanup(self):
         log.debug("udp_connection_cleanup")
@@ -979,10 +1017,10 @@ class UDPClientConnection(object): #UDPSocket):
         #log.debug("UDPCLientconnection check_incoming")
         assert condition is datagram, "UDP supports datagram sentinels only"
         if self.incoming:
-            #log.debug("incoming found")
+            log.debug("incoming found")
+            ipdb.set_trace()
             value = self.incoming.popleft()
             #TODO: do we need this still? prob do to keep diesel happy
-            ipdb.set_trace()
             self.parent.parent.remote_addr = value.addr
             return value
         def _wrap(value=ContinueNothing):
