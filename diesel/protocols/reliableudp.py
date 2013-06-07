@@ -9,6 +9,7 @@ from math import ceil
 from collections import deque
 from diesel.core import Loop
 from diesel import runtime
+import diesel.util.event
 import diesel.runtime
 #import diesel
 import sys
@@ -578,7 +579,8 @@ class ReliableUDPClientConnection(UDPClientConnection):
             self.advance_queue_time(dt)
             self.update_queues()
             self.update_stats()
-            self.last_msg_dt += dt
+            #self.last_msg_dt += dt - done in send update now
+
             #TODO: if __debug__ ? self.validate()
 
     def __init__(self, parent, sock, remote_addr):
@@ -602,6 +604,13 @@ class ReliableUDPClientConnection(UDPClientConnection):
         self.update_loop = diesel.core.ConnectedLoop(self, self.update)
         runtime.current_app.add_loop(self.update_loop)
         self.network_epoch = datetime.datetime.utcnow()
+        self.waiting_to_send = False
+
+        self.send_event = diesel.util.event.Event(True)
+        #self.send_event.set()
+
+        self.send_delay = 0.0
+        self.send_accumulator = 0.0
 
     def _internal_queue_msg(self, header, msg_data): #outgoing_dgram, priority):
         #TODO: re-order based on priority, but can't because seq # is set here already
@@ -630,31 +639,59 @@ class ReliableUDPClientConnection(UDPClientConnection):
         #log.fields(conn=self.conn_info).debug("_internal_queue_outgoing, postsend count %d" % len(self.parent.outgoing))
         self.set_writable(True)
 
-    def update(self, dt = 0.0):
-        import time
-        send_delay = 0.0
-        send_accumulator = 0.0
+    def send_update(self, dt):
+        #ipdb.set_trace()
         send_rate = self.flow_control.send_rate()
-        prev_time = time.clock()
+        curr_max_wait_time = (1.0 / send_rate) * 4.0
+        self.send_accumulator += dt
+        self.reliability.last_msg_dt += dt
+        #if self.waiting_to_send:
+        #    ipdb.set_trace()
+        #if (self.reliability.last_msg_dt > send_rate or self.reliability.last_msg_dt > curr_max_wait_time): #and self.pending_resends.is_empty and self.unsent_queue.is_empty:
+        #print "last_msg_dt: %f, self.send_delay %f, curr_max_wait_time %f" % (self.reliability.last_msg_dt, self.send_delay, self.last_msg_dt)
+        if self.waiting_to_send and self.reliability.last_msg_dt > self.send_delay:
+            #print "send_event set for waiting msg!"
+            self.send_event.set()
+        elif (self.reliability.last_msg_dt > curr_max_wait_time):
+            #self.dt_last_sent_msg = 0.0
+            if not self.waiting_to_send:
+                #print "send_event set for ackmsg!"
+                self.queue_outgoing("")
+            #print "send_event set!"
+            self.send_event.set()
+        #TODO: maybe have some mechanism for skipping this msg if another is in the queue later
+
+    def update(self):
+        import datetime #__epoce
+        #import time
+        #send_delay = 0.0
+        #send_accumulator = 0.0
+        prev_time = datetime.datetime.utcnow() #time.clock()
+        send_rate = self.flow_control.send_rate()
         while True:
             #TODO: debug timing slower for now
             #curr_max_wait_time = ReliableUDPConnection.MAX_TIME_BETWEEN_ACKS
-            curr_max_wait_time = (1.0 / send_rate) * 4.0
-            if send_delay > 0.0 and curr_max_wait_time > send_delay:
-                diesel.sleep(send_delay) # can't send until this delay is completed
-                curr_max_wait_time -= send_delay #NOTE: assuming send delay was approx what we said to sleep for.
-                if curr_max_wait_time < 0.0:
-                    curr_max_wait_time = 0.0
-                    #ipdb.set_trace()
-                send_delay = 0.0
+            #curr_max_wait_time = (1.0 / send_rate) * 4.0
+            #if self.send_delay > 0.0 and curr_max_wait_time > self.send_delay:
+            #    diesel.sleep(self.send_delay) # can't send until this delay is completed
+            #    curr_max_wait_time -= self.send_delay #NOTE: assuming send delay was approx what we said to sleep for.
+            #    if curr_max_wait_time < 0.0:
+            #        curr_max_wait_time = 0.0
+            #        #ipdb.set_trace()
+            #    self.send_delay = 0.0
             #print curr_max_wait_time
-            evt, data = diesel.first(sleep=curr_max_wait_time, waits = [self.pending_resends, self.unsent_queue])
-
-            curr_time = time.clock()
-            dt = curr_time - prev_time
+            #evt, data = diesel.first(sleep=curr_max_wait_time, waits = [self.pending_resends, self.unsent_queue])
+            evt, data = diesel.first(waits = [self.pending_resends, self.unsent_queue])
+            #print "send_event wait"
+            if not self.send_event.is_set:
+                self.waiting_to_send = True
+            self.send_event.wait()
+            self.send_delay = 0.0
+            self.waiting_to_send = False
+            #print "send_event wait DONE"
+            curr_time = datetime.datetime.utcnow() #time.clock()
+            dt = (curr_time - prev_time).total_seconds()
             prev_time = curr_time
-
-            send_accumulator += dt
 
             self.reliability.update(dt) #update latest acks etc.
             self.flow_control.update(dt, self.reliability.rtt, len(self.reliability.pendingAckQueue)/32.0 )
@@ -667,11 +704,6 @@ class ReliableUDPClientConnection(UDPClientConnection):
             elif evt == self.unsent_queue:
                 header, next_msg = data
                 #print "sending unsent msg, remaining %d" % len(self.unsent_queue.inp)
-            else:
-                assert(evt == 'sleep')
-                self.queue_outgoing("")
-                #TODO: maybe have some mechanism for skipping this msg if another is in the queue later
-                continue
 
             missing_msgs = self.reliability.process_missing_msgs()
             for msg in missing_msgs:
@@ -698,14 +730,16 @@ class ReliableUDPClientConnection(UDPClientConnection):
             self._internal_queue_outgoing(header, next_msg, priority)
 
             per_msg_rate = 1.0 / send_rate
-            send_accumulator -= per_msg_rate
+            self.send_accumulator -= per_msg_rate
             send_rate = self.flow_control.send_rate()
-            send_delay = 0.0
-            if send_accumulator < per_msg_rate:
-                send_delay = -(send_accumulator - per_msg_rate)
+            self.send_delay = 0.0
+            if self.send_accumulator < per_msg_rate:
+                self.send_delay = -(self.send_accumulator - per_msg_rate)
                 #ipdb.set_trace()
-                assert(send_delay > 0.0)
-
+                assert(self.send_delay > 0.0)
+                #print "send_event clear"
+                self.send_event.clear()
+        ipdb.set_trace()
 
     def process_datagram(self, dgram):
         #remote_msg_seq, msg_len, dgram = ReliableHeader.unpack(dgram)
@@ -832,21 +866,25 @@ class ReliableUDPConnection(UDPConnection):
 
     def __init__(self, parent, sock, ip=None, port=None, f_connection_loop = None, *args, **kw ):
         super(ReliableUDPConnection, self).__init__(parent, sock, ip, port, f_connection_loop, *args, **kw)
-#        l = Loop(self.update_client_connections)
-#        runtime.current_app.add_loop(l)
+        l = diesel.core.ConnectedLoop(self, self.update_client_connections)
+        runtime.current_app.add_loop(l)
+        #ipdb.set_trace()
         #diesel.fork_child(self.update_client_connections)
 
     def update_client_connections(self):
-        import time
-        prev_time = time.clock()
+        #import time
+        import datetime
+        prev_time = datetime.datetime.utcnow() #time.clock()
         while True:
             #TODO: debug timing slower for now
-            diesel.sleep(ReliableUDPConnection.MAX_TIME_BETWEEN_ACKS)   #TODO: not sure about the timing
-            curr_time = time.clock()
-            dt = curr_time - prev_time
+            #diesel.sleep(ReliableUDPConnection.MAX_TIME_BETWEEN_ACKS)   #TODO: not sure about the timing
+            diesel.sleep(0.1)
+            curr_time = datetime.datetime.utcnow() #time.clock() * 10.0
+            dt = (curr_time - prev_time).total_seconds()
             prev_time = curr_time
             for sub_connection in self.udp_connections.itervalues():
-                sub_connection.update(dt)
+                sub_connection.send_update(dt)
+        ipdb.set_trace()
 
     def _create_new_connection(self, sock, remote_addr):
         log.debug("RELIABLEUDPCONNECION: create_new_conenection")

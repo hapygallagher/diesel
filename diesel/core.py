@@ -903,7 +903,7 @@ class UDPConnection(UDPSocket):
             last_time = datetime.datetime.utcnow()
             dgram = receive(datagram)
             elapsed = (datetime.datetime.utcnow() - last_time).total_seconds()
-            if elapsed > 0.2:
+            if elapsed > 0.5:
                 log.info("datagram receive: slept %f " % elapsed)
             #ipdb.set_trace()
             current_loop.connection_stack.pop()

@@ -4,8 +4,8 @@ from diesel.events import Waiter, StopWaitDispatch
 class EventTimeout(Exception): pass
 
 class Event(Waiter):
-    def __init__(self):
-        self.is_set = False
+    def __init__(self, is_set = False):
+        self.is_set = is_set
 
     def set(self):
         if not self.is_set:
